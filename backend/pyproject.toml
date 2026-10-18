@@ -1,0 +1,15 @@
+[project]
+name = "contract-endorsement-engine-backend"
+version = "0.1.0"
+description = "Django REST API for contract and endorsement management"
+requires-python = ">=3.11"
+dependencies = [
+    "django>=4.2,<5.0",
+    "djangorestframework>=3.14,<4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
