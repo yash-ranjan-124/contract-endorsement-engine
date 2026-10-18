@@ -6,6 +6,7 @@ from django.db.models import ProtectedError
 from django.test import TestCase
 
 from contracts.models import Endorsement, Contract
+from contracts.services import calculate_position
 
 
 def valid_contract_data(**overrides):
@@ -409,3 +410,314 @@ class EndorsementProtectionTests(TestCase):
 
         self.assertEqual(Contract.objects.count(), 1)
         self.assertEqual(Endorsement.objects.count(), 1)
+
+
+class PositionCalculationTests(TestCase):
+    def setUp(self):
+        self.contract = build_contract()
+        self.contract.save()
+
+    def endorsement(self, number, **overrides):
+        values = {
+            "status": Endorsement.Status.AGREED,
+            "premium_change": Decimal("0.00"),
+        }
+        values.update(overrides)
+        endorsement = build_endorsement(
+            self.contract, endorsement_number=number, **values
+        )
+        endorsement.save()
+        return endorsement
+
+    def test_no_endorsements_returns_original_values_and_financials(self):
+        position = calculate_position(self.contract, [], date(2026, 6, 1))
+
+        self.assertEqual(
+            set(position),
+            {
+                "mga_reference",
+                "as_at",
+                "insured_name",
+                "status",
+                "inception_date",
+                "expiry_date",
+                "cancellation_effective_date",
+                "currency",
+                "sum_insured",
+                "gross_premium",
+                "net_premium",
+                "our_net_premium",
+                "applied_endorsements",
+            },
+        )
+        self.assertEqual(position["mga_reference"], "MGA-2026-0001")
+        self.assertEqual(position["status"], "BOUND")
+        self.assertEqual(position["gross_premium"], Decimal("15000.00"))
+        self.assertEqual(position["net_premium"], Decimal("13500.00"))
+        self.assertEqual(position["our_net_premium"], Decimal("3375.00"))
+        self.assertIsNone(position["cancellation_effective_date"])
+        self.assertEqual(position["applied_endorsements"], [])
+
+    def test_before_inception_applies_no_endorsements(self):
+        early = self.endorsement(
+            1, effective_date=date(2025, 12, 1), premium_change=Decimal("500.00")
+        )
+
+        position = calculate_position(self.contract, [early], date(2025, 12, 31))
+
+        self.assertEqual(position["applied_endorsements"], [])
+        self.assertEqual(position["gross_premium"], Decimal("15000.00"))
+
+    def test_effective_date_boundary_is_inclusive(self):
+        first = self.endorsement(
+            1, effective_date=date(2026, 3, 1), premium_change=Decimal("500.00")
+        )
+        future = self.endorsement(
+            2, effective_date=date(2026, 4, 1), premium_change=Decimal("700.00")
+        )
+        endorsements = [first, future]
+
+        before = calculate_position(self.contract, endorsements, date(2026, 2, 28))
+        on_boundary = calculate_position(self.contract, endorsements, date(2026, 3, 1))
+        before_future = calculate_position(self.contract, endorsements, date(2026, 3, 31))
+
+        self.assertEqual(before["applied_endorsements"], [])
+        self.assertEqual(before["gross_premium"], Decimal("15000.00"))
+        self.assertEqual(on_boundary["applied_endorsements"], [1])
+        self.assertEqual(on_boundary["gross_premium"], Decimal("15500.00"))
+        self.assertEqual(before_future["applied_endorsements"], [1])
+
+    def test_draft_endorsements_are_excluded(self):
+        draft = self.endorsement(
+            1,
+            status=Endorsement.Status.DRAFT,
+            effective_date=date(2026, 3, 1),
+            premium_change=Decimal("500.00"),
+        )
+        agreed = self.endorsement(
+            2, effective_date=date(2026, 3, 1), premium_change=Decimal("250.00")
+        )
+
+        position = calculate_position(self.contract, [draft, agreed], date(2026, 4, 1))
+
+        self.assertEqual(position["applied_endorsements"], [2])
+        self.assertEqual(position["gross_premium"], Decimal("15250.00"))
+
+    def test_backdated_endorsement_included_despite_later_recorded_date(self):
+        backdated = self.endorsement(
+            1,
+            effective_date=date(2026, 2, 1),
+            recorded_date=date(2026, 5, 1),
+            premium_change=Decimal("500.00"),
+        )
+
+        position = calculate_position(self.contract, [backdated], date(2026, 3, 1))
+
+        self.assertEqual(position["applied_endorsements"], [1])
+        self.assertEqual(position["gross_premium"], Decimal("15500.00"))
+
+    def test_unsorted_input_applied_in_number_order(self):
+        third = self.endorsement(
+            3, effective_date=date(2026, 3, 1), premium_change=Decimal("300.00")
+        )
+        first = self.endorsement(
+            1, effective_date=date(2026, 3, 1), premium_change=Decimal("100.00")
+        )
+        second = self.endorsement(
+            2, effective_date=date(2026, 3, 1), premium_change=Decimal("200.00")
+        )
+
+        position = calculate_position(
+            self.contract, [third, first, second], date(2026, 4, 1)
+        )
+
+        self.assertEqual(position["applied_endorsements"], [1, 2, 3])
+        self.assertEqual(position["gross_premium"], Decimal("15600.00"))
+
+    def test_number_order_wins_over_effective_date_order(self):
+        later_effective = self.endorsement(
+            1,
+            type=Endorsement.Type.CHANGE_DETAILS,
+            effective_date=date(2026, 3, 10),
+            changes={"insured_name": "First Name"},
+        )
+        earlier_effective = self.endorsement(
+            2,
+            type=Endorsement.Type.CHANGE_DETAILS,
+            effective_date=date(2026, 3, 1),
+            changes={"insured_name": "Second Name"},
+        )
+
+        position = calculate_position(
+            self.contract, [earlier_effective, later_effective], date(2026, 4, 1)
+        )
+
+        self.assertEqual(position["insured_name"], "Second Name")
+        self.assertEqual(position["applied_endorsements"], [1, 2])
+
+    def test_cover_replacement_and_signed_premium_adjustments(self):
+        cover = self.endorsement(
+            1,
+            type=Endorsement.Type.CHANGE_SUM_INSURED,
+            effective_date=date(2026, 3, 1),
+            changes={"sum_insured": "1250000.005"},
+        )
+        increase = self.endorsement(
+            2,
+            type=Endorsement.Type.PREMIUM_ADJUSTMENT,
+            effective_date=date(2026, 3, 1),
+            premium_change=Decimal("250.00"),
+        )
+        reduction = self.endorsement(
+            3,
+            type=Endorsement.Type.PREMIUM_ADJUSTMENT,
+            effective_date=date(2026, 3, 1),
+            premium_change=Decimal("-100.005"),
+        )
+        self.assertEqual(reduction.premium_change, Decimal("-100.01"))
+
+        position = calculate_position(
+            self.contract, [cover, increase, reduction], date(2026, 4, 1)
+        )
+
+        self.assertEqual(position["sum_insured"], Decimal("1250000.01"))
+        self.assertEqual(position["gross_premium"], Decimal("15149.99"))
+        self.assertEqual(position["net_premium"], Decimal("13634.99"))
+        self.assertEqual(position["our_net_premium"], Decimal("3408.75"))
+        self.assertEqual(position["applied_endorsements"], [1, 2, 3])
+
+    def test_extension_applies_only_from_effective_date(self):
+        extension = self.endorsement(
+            1,
+            type=Endorsement.Type.EXTENSION,
+            effective_date=date(2026, 6, 1),
+            changes={"expiry_date": "2027-03-31"},
+        )
+
+        before = calculate_position(self.contract, [extension], date(2026, 5, 31))
+        on_date = calculate_position(self.contract, [extension], date(2026, 6, 1))
+
+        self.assertEqual(before["expiry_date"], date(2026, 12, 31))
+        self.assertEqual(before["applied_endorsements"], [])
+        self.assertEqual(on_date["expiry_date"], date(2027, 3, 31))
+        self.assertEqual(on_date["applied_endorsements"], [1])
+
+    def test_cancellation_with_refund_applies_from_effective_date(self):
+        cancellation = self.endorsement(
+            1,
+            type=Endorsement.Type.CANCELLATION,
+            effective_date=date(2026, 7, 1),
+            premium_change=Decimal("-3000.00"),
+        )
+
+        previous_day = calculate_position(
+            self.contract, [cancellation], date(2026, 6, 30)
+        )
+        on_date = calculate_position(self.contract, [cancellation], date(2026, 7, 1))
+
+        self.assertEqual(previous_day["status"], "BOUND")
+        self.assertIsNone(previous_day["cancellation_effective_date"])
+        self.assertEqual(previous_day["expiry_date"], date(2026, 12, 31))
+        self.assertEqual(previous_day["gross_premium"], Decimal("15000.00"))
+        self.assertEqual(on_date["status"], "CANCELLED")
+        self.assertEqual(on_date["cancellation_effective_date"], date(2026, 7, 1))
+        self.assertEqual(on_date["expiry_date"], date(2026, 6, 30))
+        self.assertEqual(on_date["gross_premium"], Decimal("12000.00"))
+        self.assertEqual(on_date["net_premium"], Decimal("10800.00"))
+        self.assertEqual(on_date["our_net_premium"], Decimal("2700.00"))
+        self.assertEqual(on_date["applied_endorsements"], [1])
+
+    def test_applicable_cancellation_without_refund_raises(self):
+        cancellation = self.endorsement(
+            1,
+            type=Endorsement.Type.CANCELLATION,
+            effective_date=date(2026, 7, 1),
+            premium_change=None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "premium_change"):
+            calculate_position(self.contract, [cancellation], date(2026, 7, 1))
+
+        position = calculate_position(self.contract, [cancellation], date(2026, 6, 30))
+        self.assertEqual(position["applied_endorsements"], [])
+
+    def test_exact_half_up_financial_rounding(self):
+        net_rounding_contract = build_contract(
+            mga_reference="MGA-ROUND-SHARE",
+            gross_premium=Decimal("1.01"),
+            brokerage_pct=Decimal("50.00"),
+            signed_line_pct=Decimal("50.00"),
+        )
+        net_rounding_contract.save()
+        share_contract = build_contract(
+            mga_reference="MGA-ROUND-TIE",
+            gross_premium=Decimal("10.01"),
+            brokerage_pct=Decimal("50.00"),
+            signed_line_pct=Decimal("100.00"),
+        )
+        share_contract.save()
+
+        share_position = calculate_position(
+            net_rounding_contract, [], date(2026, 6, 1)
+        )
+        tie_position = calculate_position(share_contract, [], date(2026, 6, 1))
+
+        self.assertEqual(share_position["net_premium"], Decimal("0.51"))
+        self.assertEqual(share_position["our_net_premium"], Decimal("0.25"))
+        self.assertEqual(tie_position["net_premium"], Decimal("5.01"))
+        self.assertEqual(tie_position["our_net_premium"], Decimal("5.01"))
+
+    def test_repeated_calls_do_not_mutate_inputs_or_records(self):
+        cover = self.endorsement(
+            1,
+            type=Endorsement.Type.CHANGE_SUM_INSURED,
+            effective_date=date(2026, 3, 1),
+            changes={"sum_insured": "1250000.005"},
+        )
+        extension = self.endorsement(
+            2,
+            type=Endorsement.Type.EXTENSION,
+            effective_date=date(2026, 3, 1),
+            changes={"expiry_date": "2027-03-31"},
+        )
+        cancellation = self.endorsement(
+            3,
+            type=Endorsement.Type.CANCELLATION,
+            effective_date=date(2026, 7, 1),
+            premium_change=Decimal("-3000.00"),
+        )
+        endorsements = [cancellation, extension, cover]
+        contract_before = Contract.objects.values().get(pk=self.contract.pk)
+        records_before = list(
+            Endorsement.objects.filter(contract=self.contract).values()
+        )
+        changes_before = [dict(endorsement.changes) for endorsement in endorsements]
+        premiums_before = [endorsement.premium_change for endorsement in endorsements]
+
+        positions = [
+            calculate_position(self.contract, endorsements, as_at)
+            for as_at in (
+                date(2026, 2, 28),
+                date(2026, 3, 1),
+                date(2026, 6, 30),
+                date(2026, 7, 1),
+                date(2027, 1, 1),
+            )
+        ]
+
+        self.assertEqual(positions[0]["status"], "BOUND")
+        self.assertEqual(positions[3]["status"], "CANCELLED")
+        self.assertEqual(
+            Contract.objects.values().get(pk=self.contract.pk), contract_before
+        )
+        self.assertEqual(
+            list(Endorsement.objects.filter(contract=self.contract).values()),
+            records_before,
+        )
+        self.assertEqual(
+            [endorsement.changes for endorsement in endorsements], changes_before
+        )
+        self.assertEqual(
+            [endorsement.premium_change for endorsement in endorsements],
+            premiums_before,
+        )
