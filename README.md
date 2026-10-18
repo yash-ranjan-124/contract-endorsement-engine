@@ -24,6 +24,67 @@ A Django REST API and React application for managing insurance contracts and the
 - `backend/` — API, models, business logic, import command, and tests
 - `frontend/` — React application
 
+## Setup
+
+### Prerequisites
+
+- Python 3.11 or later
+- Node.js 18 or later
+- [uv](https://docs.astral.sh/uv/) for Python package management
+
+### Install Backend Dependencies
+
+```bash
+cd backend
+uv sync --locked
+```
+
+### Install Frontend Dependencies
+
+```bash
+cd frontend
+npm ci
+```
+
+## Development
+
+Run the backend and frontend in **separate terminal windows**.
+
+### Backend
+
+```bash
+cd backend
+uv run python manage.py migrate
+uv run python manage.py runserver
+```
+
+The API will be available at `http://127.0.0.1:8000/`.
+
+### Frontend
+
+```bash
+cd frontend
+npm run dev
+```
+
+The application will be available at `http://127.0.0.1:5173/` with API requests proxied to the backend.
+
+## Testing
+
+### Backend Tests
+
+```bash
+cd backend
+uv run python manage.py test
+```
+
+### Frontend Build
+
+```bash
+cd frontend
+npm run build
+```
+
 ## Status
 
-Under development. Setup instructions and design decisions will be added as implementation progresses.
+Phase 1: Reproducible backend and frontend setup complete.
