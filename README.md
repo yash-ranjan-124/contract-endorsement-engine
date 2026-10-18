@@ -169,7 +169,7 @@ The frontend does not calculate premiums, refunds or statuses. Money is shown as
 
 ## Assumptions and Limitations
 
-- **SQLite** is used for local development only. It stores decimals as floating-point values, so amounts near 10^16 do not round-trip. This is the cause of the failing test noted under Status.
+- **SQLite** is used for local development only. SQLite has no exact decimal type: `DecimalField` values are stored as floating-point numbers. Values beyond about 9.0 × 10^15 are not guaranteed to read back exactly, and Django's SQLite converter can then fail with `InvalidOperation`. The model accepts 18-digit amounts, so not every model-valid amount round-trips through SQLite. Python calculations still use `Decimal` throughout, and the position API returns calculated totals as exact strings even when they exceed the stored-field precision. PostgreSQL `NUMERIC` would be the preferred production monetary storage. The precision test uses amounts of 5 × 10^15 that SQLite can store exactly, and it checks the calculated totals of 10^16 without changing storage or serializer precision.
 - **Slip immutability** is enforced in application code, not by the database. Direct updates bypass it.
 - **Current cover** is interpreted as the original expiry plus agreed extensions. Dates are checked against it when an endorsement is created, not when a position is read.
 - **Drafts** are stored and shown but never applied. A draft cancellation stores a refund but does not restrict other endorsements.
@@ -188,7 +188,7 @@ A safer way to let an AI assistant use this data would be a read-only API or a n
 
 ## What Would Improve With More Time
 
-- Resolve the precision limit: store money in a type that round-trips on the target database, or move to PostgreSQL.
+- Use PostgreSQL `NUMERIC` for monetary storage in production, so every model-valid amount round-trips exactly.
 - Add browser tests for the contract screens and the endorsement form.
 - Add endorsement editing and voiding, with an audit trail of changes.
 - Add authentication and contract-level permissions.
@@ -199,8 +199,11 @@ A safer way to let an AI assistant use this data would be a read-only API or a n
 
 - Backend: contract and endorsement models, position calculation, creation rules, REST API, sample import and tests are implemented.
 - Frontend: contracts list, detail with date comparison, and endorsement form are implemented. `npm run build` passes.
-- Backend tests: 126 run, 125 pass, 1 error. The error is `test_amended_premium_totals_exceed_model_precision`, which fails during setup on SQLite because stored values near 10^16 cannot be read back (see Assumptions).
-- Browser verification has not been performed for the frontend. The API behaviour was checked over HTTP against a disposable database.
+- Backend tests: `uv run python manage.py test` runs 126 tests, all passing, in a clean checkout of the verification branch. `check` and `makemigrations --check --dry-run` report no issues.
+- Sample import on an empty disposable database: 3 contracts loaded and 1 rejected; 7 endorsements loaded and 4 rejected. Re-importing loads nothing and leaves the records unchanged.
+- API smoke checks against a new disposable database: 31 of 31 passed. They cover the five API operations, date filtering, number order, drafts, the Harbour cancellation refund of -35671.23, the Marine extension and backdated adjustment, field-level 400 errors, 404 for unknown contracts, and unchanged records after rejected requests.
+- Frontend: `npm ci` and `npm run build` pass in a clean checkout.
+- **Browser verification has not been performed.** Both the list-to-detail screens and the endorsement form are unverified in a real browser. The checklist below is the manual test to run before submission. HTTP checks and a passing build are not browser checks.
 
 ### Manual browser checklist
 

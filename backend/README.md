@@ -30,4 +30,4 @@ The development database is `db.sqlite3` in this folder. It is git-ignored. Use 
 ## Notes
 
 - The project uses SQLite for local development only. Production would need a database that stores decimals exactly, environment-based settings for `SECRET_KEY` and `DEBUG`, and authentication. None of these are configured.
-- Known open issue: one test in `contracts/tests.py` (`test_amended_premium_totals_exceed_model_precision`) fails during setup on SQLite. See the root README, Status section.
+- SQLite stores decimals as floating-point numbers, so not every model-valid 18-digit amount reads back exactly. The precision test uses amounts SQLite can store. See the root README, Assumptions and Status sections.
