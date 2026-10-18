@@ -23,6 +23,7 @@ type PositionRequest = { asAt: string }
 type PositionView =
   | { kind: 'cleared' }
   | { kind: 'loading' }
+  | { kind: 'hidden'; message: string }
   | { kind: 'error'; message: string }
   | { kind: 'ready'; position: ContractPosition }
 
@@ -63,6 +64,7 @@ export default function ContractDetail({ reference }: ContractDetailProps) {
   const [detailState, setDetailState] = useState<DetailState>({ kind: 'loading' })
   const [loadToken, setLoadToken] = useState(0)
   const loadedRef = useRef(false)
+  const [refreshing, setRefreshing] = useState(false)
   const [refreshError, setRefreshError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [selectedDate, setSelectedDate] = useState('')
@@ -86,7 +88,17 @@ export default function ContractDetail({ reference }: ContractDetailProps) {
           setSelectedDate(detail.current_position.as_at)
           setPositionState({ kind: 'ready', position: detail.current_position })
           setPositionRequest(null)
+        } else {
+          const asAt = selectedDateRef.current
+          if (asAt === '') {
+            setPositionRequest(null)
+            setPositionState(null)
+          } else {
+            setPositionState({ kind: 'loading', asAt })
+            setPositionRequest({ asAt })
+          }
         }
+        setRefreshing(false)
         setRefreshError(null)
         setDetailState({ kind: 'ready', detail })
       })
@@ -96,6 +108,7 @@ export default function ContractDetail({ reference }: ContractDetailProps) {
         }
         const message = errorMessage(error, 'Could not load contract details.')
         if (loadedRef.current) {
+          setRefreshing(false)
           setRefreshError(message)
         } else {
           setDetailState({ kind: 'error', message })
@@ -134,6 +147,7 @@ export default function ContractDetail({ reference }: ContractDetailProps) {
   }
 
   function retryRefresh() {
+    setRefreshing(true)
     setRefreshError(null)
     setLoadToken((count) => count + 1)
   }
@@ -159,16 +173,9 @@ export default function ContractDetail({ reference }: ContractDetailProps) {
 
   function handleSaved() {
     setNotice('Endorsement added.')
+    setRefreshing(true)
     setRefreshError(null)
     setLoadToken((count) => count + 1)
-    const asAt = selectedDateRef.current
-    if (asAt === '') {
-      setPositionRequest(null)
-      setPositionState(null)
-      return
-    }
-    setPositionRequest({ asAt })
-    setPositionState({ kind: 'loading', asAt })
   }
 
   if (detailState.kind === 'loading') {
@@ -191,7 +198,16 @@ export default function ContractDetail({ reference }: ContractDetailProps) {
 
   const { detail } = detailState
   const slip = detail.slip
-  const view = positionView(selectedDate, positionState)
+  const historyBusy = refreshing || refreshError !== null
+  const view: PositionView =
+    selectedDate !== '' && historyBusy
+      ? {
+          kind: 'hidden',
+          message: refreshing
+            ? 'Position is hidden while history refreshes.'
+            : 'Position is hidden until history refreshes.',
+        }
+      : positionView(selectedDate, positionState)
   const activePosition = view.kind === 'ready' ? view.position : null
   const endorsements = [...detail.endorsements].sort((a, b) => a.number - b.number)
 
@@ -290,6 +306,11 @@ export default function ContractDetail({ reference }: ContractDetailProps) {
             {notice}
           </div>
         )}
+        {refreshing && (
+          <div className="alert alert-info" role="status">
+            Refreshing history…
+          </div>
+        )}
         {refreshError !== null && (
           <div
             className="alert alert-warning d-flex flex-wrap align-items-center justify-content-between gap-2"
@@ -301,7 +322,12 @@ export default function ContractDetail({ reference }: ContractDetailProps) {
             </button>
           </div>
         )}
-        <EndorsementForm reference={reference} endorsements={endorsements} onSaved={handleSaved} />
+        <EndorsementForm
+          reference={reference}
+          endorsements={endorsements}
+          disabled={historyBusy}
+          onSaved={handleSaved}
+        />
       </section>
     </>
   )
@@ -322,6 +348,10 @@ function PositionPanel({
 
   if (view.kind === 'loading') {
     return <p role="status">Loading position…</p>
+  }
+
+  if (view.kind === 'hidden') {
+    return <p role="status" className="text-body-secondary mb-0">{view.message}</p>
   }
 
   if (view.kind === 'error') {

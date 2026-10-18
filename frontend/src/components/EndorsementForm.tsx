@@ -23,6 +23,7 @@ type FormValues = {
 type EndorsementFormProps = {
   reference: string
   endorsements: Endorsement[]
+  disabled: boolean
   onSaved: () => void
 }
 
@@ -181,7 +182,12 @@ function FieldFeedback({ id, messages }: { id: string; messages: string[] }) {
   )
 }
 
-export default function EndorsementForm({ reference, endorsements, onSaved }: EndorsementFormProps) {
+export default function EndorsementForm({
+  reference,
+  endorsements,
+  disabled,
+  onSaved,
+}: EndorsementFormProps) {
   const [values, setValues] = useState<FormValues>(INITIAL_VALUES)
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({})
   const [generalErrors, setGeneralErrors] = useState<string[]>([])
@@ -263,7 +269,7 @@ export default function EndorsementForm({ reference, endorsements, onSaved }: En
 
   return (
     <form onSubmit={handleSubmit} noValidate>
-      <fieldset disabled={submitting}>
+      <fieldset disabled={submitting || disabled}>
         {generalErrors.length > 0 && (
           <div className="alert alert-danger" role="alert">
             {generalErrors.map((message) => (
@@ -430,7 +436,14 @@ export default function EndorsementForm({ reference, endorsements, onSaved }: En
 
           <div className="col-12 col-md-6">
             {values.type === 'CANCELLATION' ? (
-              <p className="text-body-secondary mb-0">Return premium is calculated automatically.</p>
+              <>
+                <p className="text-body-secondary mb-0">Return premium is calculated automatically.</p>
+                {messagesFor('premium_change').map((message) => (
+                  <div key={message} className="invalid-feedback d-block">
+                    {message}
+                  </div>
+                ))}
+              </>
             ) : (
               <>
                 <label htmlFor="premium-change" className="form-label">

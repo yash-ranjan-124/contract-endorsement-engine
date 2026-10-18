@@ -254,7 +254,9 @@ Premium changes are entered as signed decimal text and sent as strings. Dates ar
 
 Only the fields for the selected type are sent, and the form never sends stale values from another type. Basic checks (required fields, a positive whole endorsement number) run in the browser. Business rules come from the backend. A 400 response is shown next to the matching field. Changes errors appear next to the visible type-specific field, or next to the type selector when no such field is shown. Contract and other errors appear in an alert. Entered values are kept after a failure. A new submission or a type change clears the previous errors. Submission is disabled while the request is in progress, and failed requests are not retried automatically.
 
-After a successful save, the form resets and the page shows "Endorsement added." The history and the position for the selected date are reloaded. A cleared comparison date stays cleared, and no position is fetched for it. If the save succeeds but the refresh fails, the success message stays visible with a "Retry refresh" button, and the page does not suggest submitting again.
+After a successful save, the form resets and the page shows "Endorsement added." The history is then reloaded with a GET request, and the position for the selected date is reloaded after that. While the history refresh is pending, the form is disabled and the position and AGREED application indicators are hidden. The form is enabled again only when the history refresh succeeds, so the suggested endorsement number comes from the fresh history. A cleared comparison date stays cleared, and no position is fetched for it. If the refresh fails, the success message stays visible with a "Retry refresh" button, the form stays disabled, and the page does not suggest submitting again. Retry refresh repeats only GET requests.
+
+Premium errors from the server are shown under the automatic-return-premium note for cancellations.
 
 Status: endorsement creation from the detail screen is implemented. Editing or deleting existing endorsements and contract creation from the UI are not implemented.
 
