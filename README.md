@@ -98,7 +98,7 @@ Assumptions:
 
 ## Read API
 
-Three read-only endpoints under `/api/`. Only `GET` is accepted; other methods return `405`. Positions are calculated on each request and never stored. "Today" is `timezone.localdate()`. Money is returned as fixed two-decimal strings, dates as ISO strings, and `cancellation_effective_date` is `null` unless the position is cancelled.
+Three read endpoints under `/api/`, accepting `GET` only; other methods return `405`. Creation endpoints are described in the Write API section below. Positions are calculated on each request and never stored. "Today" is `timezone.localdate()`. Money is returned as fixed two-decimal strings, dates as ISO strings, and `cancellation_effective_date` is `null` unless the position is cancelled.
 
 - `GET /api/contracts/` returns today's position for every contract, ordered by `mga_reference`. There is no pagination.
 - `GET /api/contracts/<mga_reference>/` returns `slip` (the original contract fields), `endorsements` (every endorsement including drafts, in number order), and `current_position` (today's position). Unknown references return `404`.
@@ -170,6 +170,43 @@ Example, `GET /api/contracts/MGA-2026-0001/`:
   }
 }
 ```
+
+## Write API
+
+Two creation endpoints under `/api/`. Both accept JSON. Unknown fields, including `id`, are rejected with a field error. Validation and business rules come from the model and `create_endorsement()`; the input serializers only check structure and types.
+
+Money inputs must be decimal strings or integers. JSON floats and booleans are rejected. Strings such as `"100.005"` are kept exact and rounded half-up by the model or service.
+
+- `POST /api/contracts/` creates a contract and returns the slip with `201`. `status` is optional; the only valid value is `BOUND`.
+- `POST /api/contracts/<mga_reference>/endorsements/` creates an endorsement and returns it with `201`. `endorsement_number`, `type`, `status`, `effective_date`, `recorded_date` and `reason` are required. `changes` defaults to `{}`. `premium_change` may be omitted or `null` only for `CANCELLATION`. A cancellation's refund is always calculated by the server, and any supplied amount is ignored.
+
+Example, `POST /api/contracts/` with `{"mga_reference": "MGA-2026-0001", "insured_name": "Acme Logistics Ltd", "class_of_business": "Marine Cargo", "inception_date": "2026-01-01", "expiry_date": "2026-12-31", "currency": "USD", "sum_insured": "1000000.00", "gross_premium": "120000.00", "brokerage_pct": "10.00", "signed_line_pct": "25.00"}` returns `201` with the slip, including `"status": "BOUND"`.
+
+Example, `POST /api/contracts/MGA-2026-0001/endorsements/`:
+
+```json
+{
+  "endorsement_number": 1,
+  "type": "PREMIUM_ADJUSTMENT",
+  "status": "AGREED",
+  "effective_date": "2026-03-01",
+  "recorded_date": "2026-02-15",
+  "premium_change": "-100.005",
+  "reason": "Premium correction"
+}
+```
+
+returns `201` with `"premium_change": "-100.01"`.
+
+Errors are `400` with one list of messages per field, for example:
+
+```json
+{
+  "effective_date": ["Effective date must be between 2026-01-01 and 2026-12-31."]
+}
+```
+
+Unknown contracts on the endorsement route return `400` with an `mga_reference` error. Unsupported methods return `405`.
 
 ## Setup
 

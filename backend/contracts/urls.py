@@ -10,4 +10,9 @@ urlpatterns = [
         views.contract_position,
         name="contract-position",
     ),
+    path(
+        "contracts/<str:reference>/endorsements/",
+        views.endorsement_create,
+        name="contract-endorsements",
+    ),
 ]
