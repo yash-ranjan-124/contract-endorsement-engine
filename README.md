@@ -240,6 +240,26 @@ Each reference is a button. Selecting one opens the contract detail (`GET /api/c
 
 Stale results are not shown. Each date change replaces the previous position immediately with a loading state and cancels the request in flight. A response is shown only when its `as_at` matches the selected date. Detail requests are cancelled when the detail view is left.
 
+### Adding an endorsement
+
+The contract detail has an "Add endorsement" form, which posts to `POST /api/contracts/<reference>/endorsements/`. The form suggests the next endorsement number from the history, and the number remains editable. The type selector shows the matching fields only:
+
+- Change details: new insured name.
+- Change sum insured: new sum insured.
+- Extension: new expiry date.
+- Premium adjustment: no extra field.
+- Cancellation: no premium field. The page shows "Return premium is calculated automatically." The server calculates the refund.
+
+Premium changes are entered as signed decimal text and sent as strings. Dates are entered explicitly, and the form does not restrict them, so backdated entries are allowed. The frontend does not calculate any premium or refund.
+
+Only the fields for the selected type are sent, and the form never sends stale values from another type. Basic checks (required fields, a positive whole endorsement number) run in the browser. Business rules come from the backend. A 400 response is shown next to the matching field. Changes errors appear next to the visible type-specific field, or next to the type selector when no such field is shown. Contract and other errors appear in an alert. Entered values are kept after a failure. A new submission or a type change clears the previous errors. Submission is disabled while the request is in progress, and failed requests are not retried automatically.
+
+After a successful save, the form resets and the page shows "Endorsement added." The history is then reloaded with a GET request, and the position for the selected date is reloaded after that. While the history refresh is pending, the form is disabled and the position and AGREED application indicators are hidden. The form is enabled again only when the history refresh succeeds, so the suggested endorsement number comes from the fresh history. A cleared comparison date stays cleared, and no position is fetched for it. If the refresh fails, the success message stays visible with a "Retry refresh" button, the form stays disabled, and the page does not suggest submitting again. Retry refresh repeats only GET requests.
+
+Premium errors from the server are shown under the automatic-return-premium note for cancellations.
+
+Status: endorsement creation from the detail screen is implemented. Editing or deleting existing endorsements and contract creation from the UI are not implemented.
+
 The page is built with Bootstrap CSS only, imported once in `frontend/src/main.tsx`.
 
 ## Setup

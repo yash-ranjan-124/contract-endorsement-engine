@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { fetchContractDetail, fetchContractPosition } from '../api'
 import type {
   ContractDetail as ContractDetailData,
@@ -6,6 +6,7 @@ import type {
   ContractSlip,
   Endorsement,
 } from '../types'
+import EndorsementForm from './EndorsementForm'
 
 type DetailState =
   | { kind: 'loading' }
@@ -22,6 +23,7 @@ type PositionRequest = { asAt: string }
 type PositionView =
   | { kind: 'cleared' }
   | { kind: 'loading' }
+  | { kind: 'hidden'; message: string }
   | { kind: 'error'; message: string }
   | { kind: 'ready'; position: ContractPosition }
 
@@ -33,17 +35,14 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback
 }
 
-function positionView(
-  selectedDate: string,
-  state: PositionState,
-): PositionView {
+function positionView(selectedDate: string, state: PositionState | null): PositionView {
   if (selectedDate === '') {
     return { kind: 'cleared' }
   }
-  if (state.kind === 'ready' && state.position.as_at === selectedDate) {
+  if (state !== null && state.kind === 'ready' && state.position.as_at === selectedDate) {
     return { kind: 'ready', position: state.position }
   }
-  if (state.kind === 'error' && state.asAt === selectedDate) {
+  if (state !== null && state.kind === 'error' && state.asAt === selectedDate) {
     return { kind: 'error', message: state.message }
   }
   return { kind: 'loading' }
@@ -63,10 +62,19 @@ function applicationStatus(endorsement: Endorsement, position: ContractPosition 
 
 export default function ContractDetail({ reference }: ContractDetailProps) {
   const [detailState, setDetailState] = useState<DetailState>({ kind: 'loading' })
-  const [detailAttempt, setDetailAttempt] = useState(0)
+  const [loadToken, setLoadToken] = useState(0)
+  const loadedRef = useRef(false)
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshError, setRefreshError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [selectedDate, setSelectedDate] = useState('')
+  const selectedDateRef = useRef(selectedDate)
   const [positionState, setPositionState] = useState<PositionState | null>(null)
   const [positionRequest, setPositionRequest] = useState<PositionRequest | null>(null)
+
+  useEffect(() => {
+    selectedDateRef.current = selectedDate
+  }, [selectedDate])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -75,22 +83,39 @@ export default function ContractDetail({ reference }: ContractDetailProps) {
         if (controller.signal.aborted) {
           return
         }
-        setSelectedDate(detail.current_position.as_at)
-        setPositionState({ kind: 'ready', position: detail.current_position })
-        setPositionRequest(null)
+        if (!loadedRef.current) {
+          loadedRef.current = true
+          setSelectedDate(detail.current_position.as_at)
+          setPositionState({ kind: 'ready', position: detail.current_position })
+          setPositionRequest(null)
+        } else {
+          const asAt = selectedDateRef.current
+          if (asAt === '') {
+            setPositionRequest(null)
+            setPositionState(null)
+          } else {
+            setPositionState({ kind: 'loading', asAt })
+            setPositionRequest({ asAt })
+          }
+        }
+        setRefreshing(false)
+        setRefreshError(null)
         setDetailState({ kind: 'ready', detail })
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) {
           return
         }
-        setDetailState({
-          kind: 'error',
-          message: errorMessage(error, 'Could not load contract details.'),
-        })
+        const message = errorMessage(error, 'Could not load contract details.')
+        if (loadedRef.current) {
+          setRefreshing(false)
+          setRefreshError(message)
+        } else {
+          setDetailState({ kind: 'error', message })
+        }
       })
     return () => controller.abort()
-  }, [reference, detailAttempt])
+  }, [reference, loadToken])
 
   useEffect(() => {
     if (positionRequest === null) {
@@ -118,7 +143,13 @@ export default function ContractDetail({ reference }: ContractDetailProps) {
 
   function retryDetail() {
     setDetailState({ kind: 'loading' })
-    setDetailAttempt((count) => count + 1)
+    setLoadToken((count) => count + 1)
+  }
+
+  function retryRefresh() {
+    setRefreshing(true)
+    setRefreshError(null)
+    setLoadToken((count) => count + 1)
   }
 
   function handleDateChange(value: string) {
@@ -138,6 +169,13 @@ export default function ContractDetail({ reference }: ContractDetailProps) {
     }
     setPositionRequest({ asAt: selectedDate })
     setPositionState({ kind: 'loading', asAt: selectedDate })
+  }
+
+  function handleSaved() {
+    setNotice('Endorsement added.')
+    setRefreshing(true)
+    setRefreshError(null)
+    setLoadToken((count) => count + 1)
   }
 
   if (detailState.kind === 'loading') {
@@ -160,7 +198,16 @@ export default function ContractDetail({ reference }: ContractDetailProps) {
 
   const { detail } = detailState
   const slip = detail.slip
-  const view = positionView(selectedDate, positionState ?? { kind: 'loading', asAt: selectedDate })
+  const historyBusy = refreshing || refreshError !== null
+  const view: PositionView =
+    selectedDate !== '' && historyBusy
+      ? {
+          kind: 'hidden',
+          message: refreshing
+            ? 'Position is hidden while history refreshes.'
+            : 'Position is hidden until history refreshes.',
+        }
+      : positionView(selectedDate, positionState)
   const activePosition = view.kind === 'ready' ? view.position : null
   const endorsements = [...detail.endorsements].sort((a, b) => a.number - b.number)
 
@@ -249,6 +296,39 @@ export default function ContractDetail({ reference }: ContractDetailProps) {
           </div>
         )}
       </section>
+
+      <section className="mt-4" aria-labelledby="add-endorsement-heading">
+        <h2 id="add-endorsement-heading" className="h5">
+          Add endorsement
+        </h2>
+        {notice !== null && (
+          <div className="alert alert-success" role="status">
+            {notice}
+          </div>
+        )}
+        {refreshing && (
+          <div className="alert alert-info" role="status">
+            Refreshing history…
+          </div>
+        )}
+        {refreshError !== null && (
+          <div
+            className="alert alert-warning d-flex flex-wrap align-items-center justify-content-between gap-2"
+            role="alert"
+          >
+            <span>The history could not be refreshed. {refreshError}</span>
+            <button type="button" className="btn btn-outline-secondary btn-sm" onClick={retryRefresh}>
+              Retry refresh
+            </button>
+          </div>
+        )}
+        <EndorsementForm
+          reference={reference}
+          endorsements={endorsements}
+          disabled={historyBusy}
+          onSaved={handleSaved}
+        />
+      </section>
     </>
   )
 }
@@ -268,6 +348,10 @@ function PositionPanel({
 
   if (view.kind === 'loading') {
     return <p role="status">Loading position…</p>
+  }
+
+  if (view.kind === 'hidden') {
+    return <p role="status" className="text-body-secondary mb-0">{view.message}</p>
   }
 
   if (view.kind === 'error') {

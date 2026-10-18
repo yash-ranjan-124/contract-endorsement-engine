@@ -44,3 +44,23 @@ export type ContractDetail = {
   endorsements: Endorsement[]
   current_position: ContractPosition
 }
+
+export type EndorsementType =
+  | 'CHANGE_SUM_INSURED'
+  | 'CHANGE_DETAILS'
+  | 'PREMIUM_ADJUSTMENT'
+  | 'EXTENSION'
+  | 'CANCELLATION'
+
+export type EndorsementStatus = 'DRAFT' | 'AGREED'
+
+export type EndorsementCreatePayload = {
+  endorsement_number: number
+  type: EndorsementType
+  status: EndorsementStatus
+  effective_date: string
+  recorded_date: string
+  premium_change: string | null
+  changes: Record<string, string>
+  reason: string
+}
