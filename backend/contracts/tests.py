@@ -3,10 +3,15 @@ from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db.models import ProtectedError
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 
 from contracts.models import Endorsement, Contract
-from contracts.services import calculate_cancellation_premium_change, calculate_position
+from contracts.services import (
+    calculate_cancellation_premium_change,
+    calculate_position,
+    create_endorsement,
+    validate_endorsement_changes,
+)
 
 
 def valid_contract_data(**overrides):
@@ -1001,3 +1006,466 @@ class CancellationCalculationTests(TestCase):
         self.assertEqual(after["our_net_premium"], Decimal("23473.97"))
         self.assertEqual(after["applied_endorsements"], [1, 2])
         self.assertEqual(cancellation.premium_change, Decimal("-35671.23"))
+
+
+def creation_data(**overrides):
+    data = {
+        "endorsement_number": 1,
+        "type": Endorsement.Type.PREMIUM_ADJUSTMENT,
+        "status": Endorsement.Status.AGREED,
+        "effective_date": date(2026, 3, 1),
+        "recorded_date": date(2026, 2, 15),
+        "premium_change": Decimal("0.00"),
+        "changes": {},
+        "reason": "Adjustment",
+    }
+    data.update(overrides)
+    return data
+
+
+class EndorsementCreationServiceTests(TestCase):
+    def setUp(self):
+        self.contract = build_contract(gross_premium=Decimal("120000.00"))
+        self.contract.save()
+
+    def create(self, number=1, **overrides):
+        return create_endorsement(
+            self.contract.mga_reference,
+            creation_data(endorsement_number=number, **overrides),
+        )
+
+    def test_successful_normalized_creation_keeps_slip_unchanged(self):
+        before = Contract.objects.values().get(pk=self.contract.pk)
+
+        endorsement = self.create(
+            type=Endorsement.Type.CHANGE_DETAILS,
+            effective_date="2026-03-01",
+            recorded_date="2026-02-15",
+            changes={"insured_name": "  New Name  "},
+        )
+
+        stored = Endorsement.objects.get(pk=endorsement.pk)
+        self.assertEqual(stored.changes, {"insured_name": "New Name"})
+        self.assertEqual(stored.effective_date, date(2026, 3, 1))
+        self.assertEqual(
+            Contract.objects.values().get(pk=self.contract.pk), before
+        )
+
+    def test_unknown_contract_rejected(self):
+        with self.assertRaises(ValidationError) as ctx:
+            create_endorsement("MGA-MISSING", creation_data())
+
+        self.assertIn("mga_reference", ctx.exception.message_dict)
+
+    def test_duplicate_number_rejected_at_field_level(self):
+        self.create(1)
+
+        with self.assertRaises(ValidationError) as ctx:
+            self.create(1)
+
+        self.assertIn("endorsement_number", ctx.exception.message_dict)
+        self.assertEqual(self.contract.endorsements.count(), 1)
+
+    def test_effective_date_boundaries(self):
+        for effective_date, status in (
+            (date(2025, 12, 31), Endorsement.Status.AGREED),
+            (date(2027, 1, 1), Endorsement.Status.AGREED),
+            (date(2027, 1, 1), Endorsement.Status.DRAFT),
+        ):
+            with self.subTest(effective_date=effective_date, status=status):
+                with self.assertRaises(ValidationError) as ctx:
+                    self.create(effective_date=effective_date, status=status)
+
+                self.assertIn("effective_date", ctx.exception.message_dict)
+
+        self.create(1, effective_date=date(2026, 1, 1))
+        self.create(2, effective_date=date(2026, 12, 31))
+        self.assertEqual(self.contract.endorsements.count(), 2)
+
+    def test_agreed_extension_enables_later_effective_date(self):
+        self.create(
+            1,
+            type=Endorsement.Type.EXTENSION,
+            effective_date=date(2026, 6, 1),
+            changes={"expiry_date": "2027-03-31"},
+        )
+
+        self.create(2, effective_date=date(2027, 2, 1))
+
+        self.assertEqual(self.contract.endorsements.count(), 2)
+
+    def test_draft_extension_does_not_extend_cover(self):
+        self.create(
+            1,
+            type=Endorsement.Type.EXTENSION,
+            status=Endorsement.Status.DRAFT,
+            effective_date=date(2026, 6, 1),
+            changes={"expiry_date": "2027-03-31"},
+        )
+
+        with self.assertRaises(ValidationError) as ctx:
+            self.create(2, effective_date=date(2027, 2, 1))
+
+        self.assertIn("effective_date", ctx.exception.message_dict)
+
+    def test_extension_must_increase_current_expiry(self):
+        for expiry, status in (
+            ("2026-12-31", Endorsement.Status.AGREED),
+            ("2026-06-30", Endorsement.Status.DRAFT),
+        ):
+            with self.subTest(expiry=expiry, status=status):
+                with self.assertRaises(ValidationError) as ctx:
+                    self.create(
+                        type=Endorsement.Type.EXTENSION,
+                        status=status,
+                        effective_date=date(2026, 6, 1),
+                        changes={"expiry_date": expiry},
+                    )
+
+                self.assertIn("changes", ctx.exception.message_dict)
+
+    def test_cancellation_refund_calculated_and_caller_amount_ignored(self):
+        cancellation = self.create(
+            1,
+            type=Endorsement.Type.CANCELLATION,
+            effective_date=date(2026, 9, 30),
+            premium_change=Decimal("-999.00"),
+        )
+
+        self.assertEqual(cancellation.premium_change, Decimal("-30575.34"))
+        self.assertEqual(
+            Endorsement.objects.get(pk=cancellation.pk).premium_change,
+            Decimal("-30575.34"),
+        )
+
+    def test_cancellation_cutoff_includes_cancellation_date(self):
+        self.create(
+            1,
+            type=Endorsement.Type.CANCELLATION,
+            effective_date=date(2026, 9, 30),
+        )
+
+        with self.assertRaises(ValidationError) as ctx:
+            self.create(2, effective_date=date(2026, 9, 30))
+        self.assertIn("effective_date", ctx.exception.message_dict)
+
+        self.create(3, effective_date=date(2026, 9, 29))
+        self.assertEqual(self.contract.endorsements.count(), 2)
+
+    def test_new_cancellation_rejects_conflicting_agreed_endorsements(self):
+        self.create(1, effective_date=date(2026, 10, 15))
+
+        with self.assertRaises(ValidationError) as ctx:
+            self.create(
+                2,
+                type=Endorsement.Type.CANCELLATION,
+                effective_date=date(2026, 9, 30),
+            )
+
+        self.assertIn("effective_date", ctx.exception.message_dict)
+        self.assertEqual(self.contract.endorsements.count(), 1)
+
+    def test_draft_cancellation_creates_no_barrier_and_no_position_effect(self):
+        draft_cancellation = self.create(
+            1,
+            type=Endorsement.Type.CANCELLATION,
+            status=Endorsement.Status.DRAFT,
+            effective_date=date(2026, 9, 30),
+        )
+        self.assertEqual(draft_cancellation.premium_change, Decimal("-30575.34"))
+
+        self.create(2, effective_date=date(2026, 10, 15), premium_change=Decimal("1000.00"))
+        self.create(
+            3,
+            status=Endorsement.Status.DRAFT,
+            effective_date=date(2026, 11, 1),
+            premium_change=Decimal("500.00"),
+        )
+
+        position = calculate_position(
+            self.contract,
+            list(Endorsement.objects.filter(contract=self.contract)),
+            date(2026, 12, 31),
+        )
+        self.assertEqual(position["status"], "BOUND")
+        self.assertEqual(position["applied_endorsements"], [2])
+        self.assertEqual(position["gross_premium"], Decimal("121000.00"))
+
+    def test_second_agreed_cancellation_rejected(self):
+        self.create(
+            1,
+            type=Endorsement.Type.CANCELLATION,
+            effective_date=date(2026, 9, 30),
+        )
+
+        with self.assertRaises(ValidationError) as ctx:
+            self.create(
+                2,
+                type=Endorsement.Type.CANCELLATION,
+                effective_date=date(2026, 10, 31),
+            )
+
+        self.assertIn("type", ctx.exception.message_dict)
+
+    def test_backdated_change_negative_at_earlier_date_rejected(self):
+        self.create(1, effective_date=date(2026, 6, 1), premium_change=Decimal("50000.00"))
+
+        with self.assertRaises(ValidationError) as ctx:
+            self.create(2, effective_date=date(2026, 3, 1), premium_change=Decimal("-150000.00"))
+
+        self.assertIn("premium_change", ctx.exception.message_dict)
+
+    def test_negative_intermediate_number_prefix_rejected(self):
+        self.create(2, effective_date=date(2026, 3, 1), premium_change=Decimal("200000.00"))
+
+        with self.assertRaises(ValidationError) as ctx:
+            self.create(1, effective_date=date(2026, 3, 1), premium_change=Decimal("-150000.00"))
+
+        self.assertIn("premium_change", ctx.exception.message_dict)
+        self.assertEqual(self.contract.endorsements.count(), 1)
+
+    def test_zero_gross_accepted(self):
+        zero = build_contract(mga_reference="MGA-ZERO-GROSS", gross_premium=Decimal("0.00"))
+        zero.save()
+
+        endorsement = create_endorsement(
+            "MGA-ZERO-GROSS", creation_data(premium_change=Decimal("0.00"))
+        )
+
+        self.assertIsNotNone(endorsement.pk)
+
+    def test_failed_creation_leaves_rows_unchanged(self):
+        self.create(1, premium_change=Decimal("100.00"))
+        rows_before = list(Endorsement.objects.filter(contract=self.contract).values())
+        contract_before = Contract.objects.values().get(pk=self.contract.pk)
+
+        with self.assertRaises(ValidationError):
+            self.create(2, effective_date=date(2027, 1, 1))
+
+        self.assertEqual(
+            list(Endorsement.objects.filter(contract=self.contract).values()),
+            rows_before,
+        )
+        self.assertEqual(
+            Contract.objects.values().get(pk=self.contract.pk), contract_before
+        )
+
+    def test_existing_stored_refund_stays_fixed_after_backdated_change(self):
+        cancellation = self.create(
+            1,
+            type=Endorsement.Type.CANCELLATION,
+            effective_date=date(2026, 9, 30),
+        )
+
+        self.create(2, effective_date=date(2026, 3, 1), premium_change=Decimal("1000.00"))
+
+        cancellation.refresh_from_db()
+        self.assertEqual(cancellation.premium_change, Decimal("-30575.34"))
+
+
+class EndorsementChangesValidationTests(SimpleTestCase):
+    def assertChangesError(self, endorsement_type, changes, fragment=None):
+        with self.assertRaises(ValidationError) as ctx:
+            validate_endorsement_changes(endorsement_type, changes)
+        messages = ctx.exception.message_dict["changes"]
+        if fragment is not None:
+            self.assertTrue(
+                any(fragment in message for message in messages),
+                f"{messages!r} does not mention {fragment!r}",
+            )
+        return messages
+
+    def test_valid_normalized_payload_for_every_type(self):
+        cases = [
+            (
+                Endorsement.Type.CHANGE_DETAILS,
+                {"insured_name": "  Acme Logistics Ltd  "},
+                {"insured_name": "Acme Logistics Ltd"},
+            ),
+            (
+                Endorsement.Type.CHANGE_SUM_INSURED,
+                {"sum_insured": "1250000.005"},
+                {"sum_insured": "1250000.01"},
+            ),
+            (
+                Endorsement.Type.EXTENSION,
+                {"expiry_date": "2027-03-31"},
+                {"expiry_date": "2027-03-31"},
+            ),
+            (Endorsement.Type.PREMIUM_ADJUSTMENT, {}, {}),
+            (Endorsement.Type.CANCELLATION, {}, {}),
+        ]
+        self.assertEqual(
+            {endorsement_type for endorsement_type, _, _ in cases},
+            set(Endorsement.Type.values),
+        )
+        for endorsement_type, changes, expected in cases:
+            with self.subTest(type=endorsement_type):
+                self.assertEqual(
+                    validate_endorsement_changes(endorsement_type, changes), expected
+                )
+
+    def test_unknown_type_rejected(self):
+        with self.assertRaises(ValidationError) as ctx:
+            validate_endorsement_changes("UNKNOWN", {})
+
+        self.assertIn("type", ctx.exception.message_dict)
+
+    def test_non_object_changes_rejected(self):
+        for value in (None, [], ["insured_name"], "text", 1):
+            with self.subTest(value=value):
+                self.assertChangesError(
+                    Endorsement.Type.CHANGE_DETAILS, value, "JSON object"
+                )
+        with self.subTest(type=Endorsement.Type.PREMIUM_ADJUSTMENT):
+            self.assertChangesError(
+                Endorsement.Type.PREMIUM_ADJUSTMENT, [], "JSON object"
+            )
+
+    def test_missing_keys_rejected(self):
+        cases = [
+            (Endorsement.Type.CHANGE_DETAILS, "insured_name"),
+            (Endorsement.Type.CHANGE_SUM_INSURED, "sum_insured"),
+            (Endorsement.Type.EXTENSION, "expiry_date"),
+        ]
+        for endorsement_type, key in cases:
+            with self.subTest(type=endorsement_type):
+                self.assertChangesError(endorsement_type, {}, f"'{key}'")
+
+    def test_wrong_and_extra_keys_rejected(self):
+        messages = self.assertChangesError(
+            Endorsement.Type.CHANGE_DETAILS, {"name": "Acme"}, "'insured_name'"
+        )
+        self.assertTrue(any("'name'" in message for message in messages))
+
+        self.assertChangesError(
+            Endorsement.Type.CHANGE_DETAILS,
+            {"insured_name": "Acme", "extra": 1},
+            "'extra'",
+        )
+        self.assertChangesError(
+            Endorsement.Type.PREMIUM_ADJUSTMENT, {"reason": "x"}, "'reason'"
+        )
+        self.assertChangesError(
+            Endorsement.Type.CANCELLATION, {"expiry_date": "2027-01-01"}, "'expiry_date'"
+        )
+
+    def test_invalid_insured_names_rejected(self):
+        cases = [
+            ("", "blank"),
+            ("   ", "blank"),
+            (123, "string"),
+            (None, "string"),
+            ("A" * 256, "at most 255"),
+        ]
+        for value, fragment in cases:
+            with self.subTest(value=value):
+                self.assertChangesError(
+                    Endorsement.Type.CHANGE_DETAILS,
+                    {"insured_name": value},
+                    fragment,
+                )
+
+    def test_insured_name_at_max_length_accepted(self):
+        result = validate_endorsement_changes(
+            Endorsement.Type.CHANGE_DETAILS, {"insured_name": "A" * 255}
+        )
+
+        self.assertEqual(result, {"insured_name": "A" * 255})
+
+    def test_sum_insured_rounds_half_up_to_fixed_string(self):
+        cases = [
+            ("100.005", "100.01"),
+            (Decimal("100.004"), "100.00"),
+            (5, "5.00"),
+            ("0", "0.00"),
+            ("9999999999999999.99", "9999999999999999.99"),
+        ]
+        for value, expected in cases:
+            with self.subTest(value=value):
+                result = validate_endorsement_changes(
+                    Endorsement.Type.CHANGE_SUM_INSURED, {"sum_insured": value}
+                )
+                self.assertEqual(result, {"sum_insured": expected})
+                self.assertIsInstance(result["sum_insured"], str)
+
+    def test_sum_insured_invalid_values_rejected(self):
+        cases = [
+            Decimal("-0.001"),
+            "-0.001",
+            "abc",
+            "",
+            "NaN",
+            "sNaN",
+            "Infinity",
+            "-Infinity",
+            "1E+40",
+            100.5,
+            True,
+            None,
+        ]
+        for value in cases:
+            with self.subTest(value=value):
+                self.assertChangesError(
+                    Endorsement.Type.CHANGE_SUM_INSURED,
+                    {"sum_insured": value},
+                    "sum_insured",
+                )
+
+    def test_sum_insured_field_overflow_rejected(self):
+        cases = [
+            "10000000000000000.00",
+            "9999999999999999.995",
+        ]
+        for value in cases:
+            with self.subTest(value=value):
+                self.assertChangesError(
+                    Endorsement.Type.CHANGE_SUM_INSURED,
+                    {"sum_insured": value},
+                    "must not exceed",
+                )
+
+    def test_invalid_and_noncanonical_dates_rejected(self):
+        cases = [
+            "2027-02-30",
+            "31-03-2027",
+            "2027/03/31",
+            "20270331",
+            "2027-3-31",
+            " 2027-03-31",
+            "",
+            None,
+            20270331,
+        ]
+        for value in cases:
+            with self.subTest(value=value):
+                self.assertChangesError(
+                    Endorsement.Type.EXTENSION,
+                    {"expiry_date": value},
+                    "YYYY-MM-DD",
+                )
+
+    def test_nonempty_payload_rejected_for_premium_adjustment_and_cancellation(self):
+        for endorsement_type in (
+            Endorsement.Type.PREMIUM_ADJUSTMENT,
+            Endorsement.Type.CANCELLATION,
+        ):
+            with self.subTest(type=endorsement_type):
+                self.assertChangesError(
+                    endorsement_type, {"insured_name": "Acme"}, "'insured_name'"
+                )
+
+    def test_input_dictionary_remains_unchanged(self):
+        cases = [
+            (Endorsement.Type.CHANGE_DETAILS, {"insured_name": "  Acme  "}),
+            (Endorsement.Type.CHANGE_SUM_INSURED, {"sum_insured": "100.005"}),
+            (Endorsement.Type.EXTENSION, {"expiry_date": "2027-03-31"}),
+            (Endorsement.Type.PREMIUM_ADJUSTMENT, {}),
+        ]
+        for endorsement_type, changes in cases:
+            with self.subTest(type=endorsement_type):
+                original = dict(changes)
+                result = validate_endorsement_changes(endorsement_type, changes)
+
+                self.assertEqual(changes, original)
+                self.assertIsNot(result, changes)

@@ -42,10 +42,19 @@ Assumptions:
 `Endorsement` records a numbered change to a `Contract`. Each endorsement belongs to one contract (`contract.endorsements`), and deleting a contract that has endorsements is blocked.
 
 - `endorsement_number` is unique within a contract and starts at 1. The same number may be used by different contracts.
-- `premium_change` is signed: positive increases premium, negative reduces it. Values are rounded to two decimals using `ROUND_HALF_UP`, so `-100.005` is stored as `-100.01`. It may be empty only for `CANCELLATION`; the cancellation calculation that fills it in is not implemented yet.
-- `changes` must be a JSON object. `{}` is valid. Its contents are not validated yet.
-- Business rules are deferred: cover-date checks, type-specific validation of `changes`, and position calculations are not enforced by the model.
+- `premium_change` is signed: positive increases premium, negative reduces it. Values are rounded to two decimals using `ROUND_HALF_UP`, so `-100.005` is stored as `-100.01`. It may be empty only for `CANCELLATION`; `create_endorsement()` calculates the refund for every cancellation and ignores any amount supplied by the caller.
+- `changes` must be a JSON object. `{}` is valid. Its contents are checked by the type-specific validator described below, not by the model.
 - Endorsements have no immutability rule yet.
+
+Validation has two layers:
+
+- **Structural model validation** runs in `Endorsement.save()` through `full_clean()`. It covers the contract link, the number range and uniqueness, choice fields, required dates and amounts, and the rule that `changes` is a JSON object.
+- **Type-specific validation** is `validate_endorsement_changes(endorsement_type, changes)` in `contracts/services.py`. It returns a fresh normalized dictionary and does not query or write the database. It is called by `create_endorsement()`, not by `save()`.
+  - `CHANGE_DETAILS` requires exactly `insured_name`: a string, trimmed, not blank, and at most 255 characters.
+  - `CHANGE_SUM_INSURED` requires exactly `sum_insured`: rounded half-up to two decimals, rejected if negative, and returned as a fixed two-decimal string within the field capacity.
+  - `EXTENSION` requires exactly `expiry_date` in canonical `YYYY-MM-DD` form. Whether it extends the current cover is not checked yet.
+  - `PREMIUM_ADJUSTMENT` and `CANCELLATION` require an empty `changes` object.
+  - Missing keys and unexpected keys are both rejected. Unexpected keys are reported by name so that stray payload fields cannot be stored silently.
 
 ### Contract Position
 
@@ -65,7 +74,27 @@ Assumptions:
 - The pre-cancellation expiry is the contract expiry, or the expiry set by an agreed extension effective on or before the cancellation date.
 - Formula: `refund = gross * unused_days / total_days`, where `total_days = (expiry - inception).days + 1` and `unused_days = (expiry - effective_date).days + 1`. The result is rounded `ROUND_HALF_UP` to two decimals and returned as a negative value.
 - A zero gross returns `0.00`. A date before inception, a date after the pre-cancellation expiry, or a negative gross raises `ValueError`.
-- The helper assumes the cancellation is otherwise eligible; restrictions on existing cancellations are not checked here.
+- The helper does not check cancellation eligibility; `create_endorsement()` applies those rules before it calls the helper.
+
+### Endorsement Creation
+
+`create_endorsement(mga_reference, data)` in `contracts/services.py` is the only supported way to create an endorsement. It validates the candidate, checks the business rules against the contract's existing endorsements, and saves in a transaction. Failures raise `ValidationError` keyed by field, and nothing is written. Concurrent creation is not protected against.
+
+Rules, with the error key each one reports:
+
+- **Contract**: `mga_reference` must match an existing contract (`mga_reference`).
+- **Number**: `endorsement_number` must be unused for the contract (`endorsement_number`).
+- **Changes**: validated by the type-specific validator; for `EXTENSION`, the proposed expiry must be later than the current expiry (`changes`).
+- **Current expiry**: the original expiry after all existing agreed non-cancellation endorsements. Drafts do not extend cover.
+- **Effective date**: must be on or between inception and the current expiry, inclusive, for drafts and agreed candidates alike (`effective_date`).
+- **Cancellations**: the refund is calculated from the stored history and any caller-supplied amount is ignored. A second agreed cancellation is rejected (`type`). Once an agreed cancellation exists, candidates effective on or after its date are rejected (`effective_date`). An agreed cancellation is rejected if it would leave existing agreed endorsements effective on or after its date (`effective_date`). Draft cancellations store a refund but do not affect positions or block other endorsements.
+- **Financial safety**: for an agreed candidate, gross premium is replayed at every distinct effective date in the combined agreed history, applying endorsements in number order. Any negative intermediate or final gross is rejected (`premium_change`). Drafts are not replayed.
+
+Assumptions:
+
+- A stored cancellation refund is fixed when it is saved. Later backdated endorsements do not recalculate it.
+- The duplicate-number check runs before model validation so that the error is field-level.
+- Malformed or unexpected keys in `data` are rejected by field name.
 
 ## Setup
 
