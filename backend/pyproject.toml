@@ -5,7 +5,7 @@ description = "Django REST API for contract and endorsement management"
 requires-python = ">=3.11"
 dependencies = [
     "django>=5.2,<5.3",
-    "djangorestframework",
+    "djangorestframework>=3.16,<3.17",
 ]
 
 [tool.uv]
