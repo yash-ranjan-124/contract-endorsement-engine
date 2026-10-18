@@ -169,7 +169,7 @@ The frontend does not calculate premiums, refunds or statuses. Money is shown as
 
 ## Assumptions and Limitations
 
-- **SQLite** is used for local development only. SQLite has no exact decimal type: `DecimalField` values are stored as floating-point numbers. Values beyond about 9.0 × 10^15 are not guaranteed to read back exactly, and Django's SQLite converter can then fail with `InvalidOperation`. The model accepts 18-digit amounts, so not every model-valid amount round-trips through SQLite. Python calculations still use `Decimal` throughout, and the position API returns calculated totals as exact strings even when they exceed the stored-field precision. PostgreSQL `NUMERIC` would be the preferred production monetary storage. The precision test uses amounts of 5 × 10^15 that SQLite can store exactly, and it checks the calculated totals of 10^16 without changing storage or serializer precision.
+- **SQLite** is used for local development only. SQLite does not provide native fixed-point decimal storage. High-significance monetary values may lose precision, including fractional cents at amounts below the integer exactness threshold. Not every value accepted by the model round-trips exactly. Application calculations use Decimal; PostgreSQL NUMERIC is preferred for production monetary storage.
 - **Slip immutability** is enforced in application code, not by the database. Direct updates bypass it.
 - **Current cover** is interpreted as the original expiry plus agreed extensions. Dates are checked against it when an endorsement is created, not when a position is read.
 - **Drafts** are stored and shown but never applied. A draft cancellation stores a refund but does not restrict other endorsements.
