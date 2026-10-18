@@ -97,7 +97,7 @@ Validation happens in three places:
 
 - **Effective date:** only `AGREED` endorsements with `effective_date <= as_at` are applied. The effective date is inclusive. `recorded_date` is not used for filtering, so a backdated endorsement applies from its effective date. Nothing is applied before inception.
 - **Application order:** applicable endorsements are applied in ascending `endorsement_number`, regardless of input order or effective-date order.
-- **Conflicts:** when applicable changes touch the same field, the higher-numbered endorsement wins, even if its effective date is earlier. The implemented rule is number order. Changing it to effective-date order would make a later-recorded backdated change overrule a change the insurer issued after it, and it would need a tie-breaker for equal dates. The current rule is simple and reproducible, so it is the one implemented.
+- **Conflicts:** when applicable changes touch the same field, the higher-numbered endorsement wins, even if its effective date is earlier. The implemented rule is number order. For example, #1 effective in March sets a field to B, while #2 effective in February sets it to C. In March, number order produces C; effective-date order would produce B. We preserve rule 3 rather than change historical results.
 - **Expiry:** an extension changes the expiry from its effective date. A cancellation sets the status to `CANCELLED`, sets the cancellation date and ends expiry the day before. Positions past the expiry are not blocked.
 
 ## Rounding and Cancellation Rules
@@ -174,7 +174,7 @@ The frontend does not calculate premiums, refunds or statuses. Money is shown as
 - **Current cover** is interpreted as the original expiry plus agreed extensions. Dates are checked against it when an endorsement is created, not when a position is read.
 - **Drafts** are stored and shown but never applied. A draft cancellation stores a refund but does not restrict other endorsements.
 - **Stored refunds** are fixed when saved. Later backdated changes do not recalculate them, so a refund can differ from one calculated today.
-- **Concurrency:** the rule checks and the save are not one atomic database operation. Two requests can pass the checks together. The database still rejects duplicate numbers, but other rules have no lock.
+- **Concurrency:** Creation runs inside `transaction.atomic()`, but transactions are not serialized with per-contract locking. Concurrent requests can validate against the same history. The database enforces unique endorsement numbers.
 - **No authentication**, no endorsement editing or deletion, and no contract creation from the UI. The API is intended for local use.
 
 ## AI Question
