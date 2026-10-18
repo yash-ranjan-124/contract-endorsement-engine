@@ -1,204 +1,153 @@
 # Contract Endorsement Engine
 
-A Django REST API and React application for managing insurance contracts and their endorsements.
+A Django REST API and React application for recording original insurance contract slips and their numbered endorsements, and for calculating the as-amended position of a contract on any date.
 
 ## Features
 
-- Preserve original contract slips without modification.
-- Record numbered endorsements for cover changes, premium adjustments, extensions, and cancellations.
-- Calculate a contract’s as-amended position on a selected date.
-- Apply agreed endorsements in number order; exclude drafts.
-- Calculate premiums and cancellation refunds using exact decimal arithmetic.
-- Import sample data with clear rejection reasons.
-- Compare the original slip and amended position in the UI.
+- Store original contract slips; the slip itself is not edited after creation.
+- Record numbered endorsements for cover changes, premium adjustments, extensions and cancellations.
+- Calculate a contract's position on a selected date, including the premium and net figures.
+- Apply agreed endorsements in number order; drafts are stored but never applied.
+- Calculate cancellation return premiums with exact decimal arithmetic.
+- Import sample data with clear, per-row rejection reasons.
+- Browse contracts, compare the original slip with the position on a selected date, and add endorsements from the detail screen.
 
 ## Tech Stack
 
-- **Backend:** Python, Django, Django REST Framework
-- **Frontend:** React, TypeScript, Vite
-- **Database:** SQLite
-- **Python package manager:** uv
+- **Backend:** Python 3.11+, Django 5.2, Django REST Framework 3.16
+- **Frontend:** React 18, TypeScript, Vite, Bootstrap 5 CSS
+- **Database:** SQLite (local development)
+- **Package managers:** uv (Python), npm (frontend)
 
 ## Project Structure
 
-- `backend/` — API, models, business logic, import command, and tests
-- `frontend/` — React application
+- `backend/`: Django project (`config/`), `contracts` app (models, services, serializers, views, management command, tests) and `sample_data/`.
+- `frontend/`: React application (`src/components/`, `src/api.ts`, `src/types.ts`).
+
+## Setup
+
+Prerequisites: Python 3.11 or later, [uv](https://docs.astral.sh/uv/), and Node.js 18 or later with npm.
+
+Run the backend from the `backend` folder. Each command below starts from the repository root, so you can paste the blocks in order.
+
+**Terminal 1: backend**
+
+```bash
+cd backend
+uv sync --locked
+uv run python manage.py migrate
+uv run python manage.py import_data sample_data/contracts.json sample_data/endorsements.json
+uv run python manage.py runserver
+```
+
+The API is then available at `http://127.0.0.1:8000/api/contracts/`.
+
+**Terminal 2: frontend** (from the repository root)
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+Open `http://127.0.0.1:5173/`. Vite proxies `/api` requests to the backend on port 8000, so both terminals must be running.
+
+### Tests and build
+
+```bash
+cd backend
+uv run python manage.py check
+uv run python manage.py makemigrations --check --dry-run
+uv run python manage.py test
+```
+
+```bash
+cd frontend
+npm run build
+```
+
+### Sample data
+
+`import_data` reads both files and checks that they are valid JSON arrays before writing anything. It imports contracts first, then endorsements, each in file order. Each row runs in its own transaction, so one rejected row does not stop the others. Expected result on an empty database:
+
+- Contracts: 3 loaded, 1 rejected (`MNK-PR-2026-004`, expiry before inception).
+- Endorsements: 7 loaded, 4 rejected (row 5 after the cancellation, row 9 duplicate number 3, row 10 before inception, row 11 unknown contract).
+
+The command never overwrites or deletes records. Running it again on the same database loads nothing: 0 contracts and 0 endorsements are loaded, and 4 contract rows and 11 endorsement rows are rejected. Eight endorsement rows are rejected as duplicate numbers; the others fail their own rules again. Existing records are unchanged.
 
 ## Data Model
 
-`Contract` stores the original bound slip only. It does not store the calculated as-amended position; that will be derived from the slip and its endorsements.
+**Why original slips and endorsements are separate.** A `Contract` records the slip as it was bound. Endorsements are later changes issued against it. Keeping them apart means the original terms are always visible, each change keeps its own dates and reason, and the current position is derived from the history rather than stored. Position figures are calculated on request and are never saved.
 
-Assumptions:
-- `mga_reference` is unique across contracts.
-- `currency` is an ISO-style three-letter uppercase ASCII code (e.g. `USD`).
-- `sum_insured` and `gross_premium` are never negative. Negativity is checked before rounding, so `-0.001` is rejected. Accepted inputs are `Decimal` values, integers and decimal strings; floats, malformed text and non-finite values are rejected. Accepted amounts are rounded to two decimal places using `ROUND_HALF_UP` (e.g. `100.005` is stored as `100.01`, `100.004` as `100.00`) before validation and storage.
-- `brokerage_pct` and `signed_line_pct` are between 0 and 100 inclusive.
-- `expiry_date` is on or after `inception_date`; a same-day cover is allowed.
-- `status` has a single allowed value, `BOUND`.
-- Slip fields are immutable after creation. `Contract.save()` rejects changes to existing rows. This is application-level protection: `QuerySet.update()`, bulk operations that modify existing rows, and raw SQL bypass it and must not be used to change slip data.
+**Contract** holds the bound slip: reference (unique), insured name, class of business, inception and expiry dates, currency, sum insured, gross premium, brokerage and signed-line percentages, and a status that can only be `BOUND`. Monetary values are `Decimal` values rounded to two decimals.
 
-### Endorsements
+**Endorsement** belongs to one contract and has a number unique within that contract, a type (`CHANGE_SUM_INSURED`, `CHANGE_DETAILS`, `PREMIUM_ADJUSTMENT`, `EXTENSION` or `CANCELLATION`), a status (`DRAFT` or `AGREED`), effective and recorded dates, a signed premium change, a `changes` JSON object and a reason. Deleting a contract that has endorsements is blocked.
 
-`Endorsement` records a numbered change to a `Contract`. Each endorsement belongs to one contract (`contract.endorsements`), and deleting a contract that has endorsements is blocked.
+Validation happens in three places:
 
-- `endorsement_number` is unique within a contract and starts at 1. The same number may be used by different contracts.
-- `premium_change` is signed: positive increases premium, negative reduces it. Values are rounded to two decimals using `ROUND_HALF_UP`, so `-100.005` is stored as `-100.01`. It may be empty only for `CANCELLATION`; `create_endorsement()` calculates the refund for every cancellation and ignores any amount supplied by the caller.
-- `changes` must be a JSON object. `{}` is valid. Its contents are checked by the type-specific validator described below, not by the model.
-- Endorsements have no immutability rule yet.
+- The model checks structure and field types when it saves.
+- `validate_endorsement_changes()` checks the per-type `changes` payload.
+- `create_endorsement()` applies the business rules against the contract's history.
 
-Validation has two layers:
+**Slip immutability is application-level.** `Contract.save()` rejects any change to an existing slip. `QuerySet.update()`, bulk operations on existing rows and raw SQL bypass this check and must not be used to change slip data.
 
-- **Structural model validation** runs in `Endorsement.save()` through `full_clean()`. It covers the contract link, the number range and uniqueness, choice fields, required dates and amounts, and the rule that `changes` is a JSON object.
-- **Type-specific validation** is `validate_endorsement_changes(endorsement_type, changes)` in `contracts/services.py`. It returns a fresh normalized dictionary and does not query or write the database. It is called by `create_endorsement()`, not by `save()`.
-  - `CHANGE_DETAILS` requires exactly `insured_name`: a string, trimmed, not blank, and at most 255 characters.
-  - `CHANGE_SUM_INSURED` requires exactly `sum_insured`: rounded half-up to two decimals, rejected if negative, and returned as a fixed two-decimal string within the field capacity.
-  - `EXTENSION` requires exactly `expiry_date` in canonical `YYYY-MM-DD` form. Whether it extends the current cover is not checked yet.
-  - `PREMIUM_ADJUSTMENT` and `CANCELLATION` require an empty `changes` object.
-  - Missing keys and unexpected keys are both rejected. Unexpected keys are reported by name so that stray payload fields cannot be stored silently.
+## Position Calculation
 
-### Contract Position
+`calculate_position(contract, endorsements, as_at)` is a pure function over records the caller has already loaded.
 
-`calculate_position(contract, endorsements, as_at)` in `contracts/services.py` calculates a read-only position for a date. The caller loads the records; the function does not query or write the database.
+- **Effective date:** only `AGREED` endorsements with `effective_date <= as_at` are applied. The effective date is inclusive. `recorded_date` is not used for filtering, so a backdated endorsement applies from its effective date. Nothing is applied before inception.
+- **Application order:** applicable endorsements are applied in ascending `endorsement_number`, regardless of input order or effective-date order.
+- **Conflicts:** when applicable changes touch the same field, the higher-numbered endorsement wins, even if its effective date is earlier. The implemented rule is number order. For example, #1 effective in March sets a field to B, while #2 effective in February sets it to C. In March, number order produces C; effective-date order would produce B. We preserve rule 3 rather than change historical results.
+- **Expiry:** an extension changes the expiry from its effective date. A cancellation sets the status to `CANCELLED`, sets the cancellation date and ends expiry the day before. Positions past the expiry are not blocked.
 
-- Only `AGREED` endorsements with `effective_date <= as_at` are applied. The effective date is inclusive. `recorded_date` is not used for filtering, so backdated endorsements apply from their effective date.
-- Nothing is applied when `as_at` is before the contract's inception date.
-- Endorsements are applied in ascending `endorsement_number`, regardless of input order or effective-date order. When two changes touch the same field, the higher number wins.
-- A cancellation sets the status to `CANCELLED`, sets the cancellation date, and ends expiry the day before. Its stored `premium_change` is applied. A missing refund raises `ValueError`; it is never treated as zero.
-- Financial rounding uses `ROUND_HALF_UP` to two decimals. Gross premium is rounded first. `net_premium` is gross after brokerage, and `our_net_premium` is calculated from the unrounded net share and then rounded, so net is not rounded before the share is calculated.
+## Rounding and Cancellation Rules
 
-### Cancellation Return Premium
+- All monetary results are rounded to two decimals with `ROUND_HALF_UP`. The sign is kept, so `-100.005` becomes `-100.01`.
+- Gross premium is the original gross plus the stored premium changes of the applicable endorsements, rounded first.
+- `net_premium = rounded_gross × (1 − brokerage_pct / 100)`.
+- `our_net_premium = (unrounded net × signed_line_pct / 100)`, rounded. It is taken from the unrounded net, not the rounded net.
+- The cancellation refund is `gross × unused_days / total_days`, where `total_days = (expiry − inception) + 1` and `unused_days = (expiry − cancellation_date) + 1`. The expiry used is the expiry in force on the cancellation date, including agreed extensions. The result is rounded half-up and returned as a negative `premium_change`.
+- A zero gross returns `0.00`. A cancellation date before inception, after the pre-cancellation expiry, or a negative gross is rejected.
 
-`calculate_cancellation_premium_change(contract, endorsements, effective_date)` returns the negative `premium_change` for a cancellation. It does not save anything.
+## Endorsement Creation Rules
 
-- The pre-cancellation position is calculated from all non-cancellation endorsements using `calculate_position()`, so the gross premium and expiry date reflect only agreed changes effective on or before the cancellation date.
-- The pre-cancellation expiry is the contract expiry, or the expiry set by an agreed extension effective on or before the cancellation date.
-- Formula: `refund = gross * unused_days / total_days`, where `total_days = (expiry - inception).days + 1` and `unused_days = (expiry - effective_date).days + 1`. The result is rounded `ROUND_HALF_UP` to two decimals and returned as a negative value.
-- A zero gross returns `0.00`. A date before inception, a date after the pre-cancellation expiry, or a negative gross raises `ValueError`.
-- The helper does not check cancellation eligibility; `create_endorsement()` applies those rules before it calls the helper.
+Creation is available through `create_endorsement()`, the REST API and the detail screen. Each rule is checked against the stored history, and rejected requests write nothing.
 
-### Endorsement Creation
+- **Number:** unused for the contract (`endorsement_number`).
+- **Current cover:** the original expiry after all existing agreed non-cancellation endorsements. Drafts do not extend cover.
+- **Effective date:** between inception and the current expiry, inclusive, for drafts and agreed items alike (`effective_date`).
+- **Extension:** the new expiry must be later than the current expiry (`changes`).
+- **Cancellation:** a second agreed cancellation is rejected (`type`). Once an agreed cancellation exists, later candidates are rejected (`effective_date`). An agreed cancellation may not leave existing agreed endorsements effective on or after its date. The refund is calculated by the server, and any amount the caller supplies is ignored.
+- **Premium safety:** for an agreed candidate, the gross is replayed at every effective date in the combined agreed history. A negative intermediate or final gross is rejected (`premium_change`). Drafts are not replayed.
 
-`create_endorsement(mga_reference, data)` in `contracts/services.py` is the only supported way to create an endorsement. It validates the candidate, checks the business rules against the contract's existing endorsements, and saves in a transaction. Failures raise `ValidationError` keyed by field, and nothing is written. Concurrent creation is not protected against.
+## REST API
 
-Rules, with the error key each one reports:
+All endpoints are under `/api/`. Read endpoints accept `GET` only; the list route also accepts `POST`.
 
-- **Contract**: `mga_reference` must match an existing contract (`mga_reference`).
-- **Number**: `endorsement_number` must be unused for the contract (`endorsement_number`).
-- **Changes**: validated by the type-specific validator; for `EXTENSION`, the proposed expiry must be later than the current expiry (`changes`).
-- **Current expiry**: the original expiry after all existing agreed non-cancellation endorsements. Drafts do not extend cover.
-- **Effective date**: must be on or between inception and the current expiry, inclusive, for drafts and agreed candidates alike (`effective_date`).
-- **Cancellations**: the refund is calculated from the stored history and any caller-supplied amount is ignored. A second agreed cancellation is rejected (`type`). Once an agreed cancellation exists, candidates effective on or after its date are rejected (`effective_date`). An agreed cancellation is rejected if it would leave existing agreed endorsements effective on or after its date (`effective_date`). Draft cancellations store a refund but do not affect positions or block other endorsements.
-- **Financial safety**: for an agreed candidate, gross premium is replayed at every distinct effective date in the combined agreed history, applying endorsements in number order. Any negative intermediate or final gross is rejected (`premium_change`). Drafts are not replayed.
+| Method and path | Purpose |
+| --- | --- |
+| `GET /api/contracts/` | Current positions for all contracts, ordered by reference. |
+| `POST /api/contracts/` | Create a contract. `status` is optional and must be `BOUND`. Returns `201`. |
+| `GET /api/contracts/<reference>/` | Original slip, endorsement history (including drafts) and the current position. |
+| `GET /api/contracts/<reference>/position/?as_at=YYYY-MM-DD` | Position on the given date; defaults to today. `400` for a malformed date. |
+| `POST /api/contracts/<reference>/endorsements/` | Create an endorsement. Returns `201`, or `400` with field-level errors. |
 
-Assumptions:
-
-- A stored cancellation refund is fixed when it is saved. Later backdated endorsements do not recalculate it.
-- The duplicate-number check runs before model validation so that the error is field-level.
-- Malformed or unexpected keys in `data` are rejected by field name.
-
-## Read API
-
-Three read endpoints under `/api/`, accepting `GET` only; other methods return `405`. Creation endpoints are described in the Write API section below. Positions are calculated on each request and never stored. "Today" is `timezone.localdate()`. Money is returned as fixed two-decimal strings, dates as ISO strings, and `cancellation_effective_date` is `null` unless the position is cancelled.
-
-- `GET /api/contracts/` returns today's position for every contract, ordered by `mga_reference`. There is no pagination.
-- `GET /api/contracts/<mga_reference>/` returns `slip` (the original contract fields), `endorsements` (every endorsement including drafts, in number order), and `current_position` (today's position). Unknown references return `404`.
-- `GET /api/contracts/<mga_reference>/position/?as_at=YYYY-MM-DD` returns the position on that date. Omitting `as_at` uses today. An empty, malformed or non-canonical value returns `400` with an `as_at` field error. Unknown references return `404`.
-
-Example, `GET /api/contracts/MGA-2026-0001/position/?as_at=2026-06-15` with one agreed premium adjustment of `500.00` effective 2026-03-01:
+Example creation request:
 
 ```json
 {
-  "mga_reference": "MGA-2026-0001",
-  "as_at": "2026-06-15",
-  "insured_name": "Acme Logistics Ltd",
-  "status": "BOUND",
-  "inception_date": "2026-01-01",
-  "expiry_date": "2026-12-31",
-  "cancellation_effective_date": null,
-  "currency": "USD",
-  "sum_insured": "1000000.00",
-  "gross_premium": "120500.00",
-  "net_premium": "108450.00",
-  "our_net_premium": "27112.50",
-  "applied_endorsements": [1]
-}
-```
-
-Example, `GET /api/contracts/MGA-2026-0001/`:
-
-```json
-{
-  "slip": {
-    "mga_reference": "MGA-2026-0001",
-    "insured_name": "Acme Logistics Ltd",
-    "class_of_business": "Marine Cargo",
-    "inception_date": "2026-01-01",
-    "expiry_date": "2026-12-31",
-    "currency": "USD",
-    "sum_insured": "1000000.00",
-    "gross_premium": "120000.00",
-    "brokerage_pct": "10.00",
-    "signed_line_pct": "25.00",
-    "status": "BOUND"
-  },
-  "endorsements": [
-    {
-      "number": 1,
-      "type": "PREMIUM_ADJUSTMENT",
-      "status": "AGREED",
-      "effective_date": "2026-03-01",
-      "recorded_date": "2026-02-15",
-      "premium_change": "500.00",
-      "changes": {},
-      "reason": "Adjust premium for additional exposure"
-    }
-  ],
-  "current_position": {
-    "mga_reference": "MGA-2026-0001",
-    "as_at": "2026-06-15",
-    "insured_name": "Acme Logistics Ltd",
-    "status": "BOUND",
-    "inception_date": "2026-01-01",
-    "expiry_date": "2026-12-31",
-    "cancellation_effective_date": null,
-    "currency": "USD",
-    "sum_insured": "1000000.00",
-    "gross_premium": "120500.00",
-    "net_premium": "108450.00",
-    "our_net_premium": "27112.50",
-    "applied_endorsements": [1]
-  }
-}
-```
-
-## Write API
-
-Two creation endpoints under `/api/`. Both accept JSON. Unknown fields, including `id`, are rejected with a field error. Validation and business rules come from the model and `create_endorsement()`; the input serializers only check structure and types.
-
-Money inputs must be decimal strings or integers. JSON floats and booleans are rejected. Strings such as `"100.005"` are kept exact and rounded half-up by the model or service.
-
-- `POST /api/contracts/` creates a contract and returns the slip with `201`. `status` is optional; the only valid value is `BOUND`.
-- `POST /api/contracts/<mga_reference>/endorsements/` creates an endorsement and returns it with `201`. `endorsement_number`, `type`, `status`, `effective_date`, `recorded_date` and `reason` are required. `changes` defaults to `{}`. `premium_change` may be omitted or `null` only for `CANCELLATION`. A cancellation's refund is always calculated by the server, and any supplied amount is ignored.
-
-Example, `POST /api/contracts/` with `{"mga_reference": "MGA-2026-0001", "insured_name": "Acme Logistics Ltd", "class_of_business": "Marine Cargo", "inception_date": "2026-01-01", "expiry_date": "2026-12-31", "currency": "USD", "sum_insured": "1000000.00", "gross_premium": "120000.00", "brokerage_pct": "10.00", "signed_line_pct": "25.00"}` returns `201` with the slip, including `"status": "BOUND"`.
-
-Example, `POST /api/contracts/MGA-2026-0001/endorsements/`:
-
-```json
-{
-  "endorsement_number": 1,
+  "endorsement_number": 5,
   "type": "PREMIUM_ADJUSTMENT",
   "status": "AGREED",
-  "effective_date": "2026-03-01",
-  "recorded_date": "2026-02-15",
-  "premium_change": "-100.005",
-  "reason": "Premium correction"
+  "effective_date": "2026-06-01",
+  "recorded_date": "2026-06-02",
+  "premium_change": "500.00",
+  "changes": {},
+  "reason": "Premium adjustment for additional exposure"
 }
 ```
 
-returns `201` with `"premium_change": "-100.01"`.
-
-Errors are `400` with one list of messages per field, for example:
+Money inputs must be decimal strings or integers; JSON floats and booleans are rejected. Unknown fields are rejected. Error responses map each problem to the field it concerns:
 
 ```json
 {
@@ -206,123 +155,69 @@ Errors are `400` with one list of messages per field, for example:
 }
 ```
 
-Unknown contracts on the endorsement route return `400` with an `mga_reference` error. Unsupported methods return `405`.
+Unknown contracts on the endorsement route return `400` with an `mga_reference` error. Unknown contracts on the read routes return `404`.
 
-## Sample Data Import
+## Contracts Screens
 
-`backend/sample_data/` contains a sample contract file and a sample endorsement file. Import them from `backend/`:
+The React app has three parts:
 
-```bash
-uv run python manage.py import_data sample_data/contracts.json sample_data/endorsements.json
-```
+- **Contracts list:** one row per contract with its current insured name, status, cover period, currency and gross premium. Each reference opens the detail screen.
+- **Contract detail:** the original slip beside the position for a selected date. Changed values are shaded and labelled "Changed". The date input starts from the current position's date. Clearing it stops position requests. The endorsement history follows, with an application status for each row.
+- **Add endorsement form:** shown on the detail screen. The form suggests the next number and shows only the fields for the selected type. The server's messages appear next to the matching field. While the history refreshes after a save, the form is disabled and the position and application indicators are hidden. Retry refresh repeats only GET requests.
 
-Both files are read and checked for valid JSON and top-level arrays before anything is written. Contracts are imported first, then endorsements, each in file order. Each row runs in its own transaction, so one rejected row does not stop the rest. Each rejection prints the row number, the reference, and the field-level reasons.
+The frontend does not calculate premiums, refunds or statuses. Money is shown as the exact string from the API.
 
-On an empty database the sample produces:
+## Assumptions and Limitations
 
-- Contracts: 3 loaded, 1 rejected (`MNK-PR-2026-004`, expiry before inception).
-- Endorsements: 7 loaded, 4 rejected (row 5 effective after the cancellation, row 9 duplicate number 3, row 10 before inception, row 11 unknown contract).
+- **SQLite** is used for local development only. SQLite does not provide native fixed-point decimal storage. High-significance monetary values may lose precision, including fractional cents at amounts below the integer exactness threshold. Not every value accepted by the model round-trips exactly. Application calculations use Decimal; PostgreSQL NUMERIC is preferred for production monetary storage.
+- **Slip immutability** is enforced in application code, not by the database. Direct updates bypass it.
+- **Current cover** is interpreted as the original expiry plus agreed extensions. Dates are checked against it when an endorsement is created, not when a position is read.
+- **Drafts** are stored and shown but never applied. A draft cancellation stores a refund but does not restrict other endorsements.
+- **Stored refunds** are fixed when saved. Later backdated changes do not recalculate them, so a refund can differ from one calculated today.
+- **Concurrency:** Creation runs inside `transaction.atomic()`, but transactions are not serialized with per-contract locking. Concurrent requests can validate against the same history. The database enforces unique endorsement numbers.
+- **No authentication**, no endorsement editing or deletion, and no contract creation from the UI. The API is intended for local use.
 
-The import never overwrites or deletes. Running it again on the same database loads nothing: 0 contracts loaded and 4 rejected, and 0 endorsements loaded and 11 rejected. Not every rejection is a duplicate. Three contract rows and eight endorsement rows are rejected as duplicate references or numbers; the remaining rows (contract row 4, endorsement rows 5, 10 and 11) fail their own validation rules again. Existing records are unchanged.
+## AI Question
 
-## Contracts List (Frontend)
+A safer way to let an AI assistant use this data would be a read-only API or a narrow tool. It would accept only validated reference and date values and return typed, structured results. Access would be checked per contract, and each query would be logged for audit. This is a proposed design only: none of it is implemented, and this project does not provide security for an AI integration.
 
-The React app shows one row per contract from `GET /api/contracts/`, in reference order. Each row shows the current insured name, status, cover period, currency and gross premium, as returned by the backend. The UI does not calculate premiums or infer statuses. Money is displayed as the exact string returned, with two decimals.
+## AI Tools Used
 
-The page has four states: loading, empty (`No contracts found.`), error (with a Retry button), and the contracts table. Setup and import instructions are kept in this README rather than in the UI. Requests are cancelled when the component unmounts, so cancelled requests do not show errors or update state.
+- **Claude Code (Haiku model):** implementation of the backend, frontend and tests, in phased pull requests.
+- **ChatGPT:** planning and review of the phases, as part of this project's workflow.
 
-Each reference is a button. Selecting one opens the contract detail (`GET /api/contracts/<reference>/`), and "Back to contracts" returns to the list. The detail shows:
+## What Would Improve With More Time
 
-- The original slip: reference, class of business, insured name, status, cover dates, currency, sum insured, gross premium, brokerage percentage and signed-line percentage.
-- A position panel for a selected date. It starts with the current position from the detail response, so no extra request is made when the detail opens. Changing the date fetches `GET /api/contracts/<reference>/position/?as_at=YYYY-MM-DD`. Clearing the date sends no request and shows "Select a date to view the position." Dates before inception or after expiry are allowed.
-- Comparison with the original slip. Insured name, status, cover dates, currency, sum insured and gross premium are compared by their API strings. A differing value is shaded and labelled "Changed". Net premium and our net premium have no original figure in the slip, so they are shown without comparison.
-- Endorsement history in number order, with an Application status column. DRAFT rows are always "Not applied". AGREED rows show "Applied" or "Not applied on selected date" for the selected date. While the position is loading, failed or cleared, AGREED rows show no application status.
-
-Stale results are not shown. Each date change replaces the previous position immediately with a loading state and cancels the request in flight. A response is shown only when its `as_at` matches the selected date. Detail requests are cancelled when the detail view is left.
-
-### Adding an endorsement
-
-The contract detail has an "Add endorsement" form, which posts to `POST /api/contracts/<reference>/endorsements/`. The form suggests the next endorsement number from the history, and the number remains editable. The type selector shows the matching fields only:
-
-- Change details: new insured name.
-- Change sum insured: new sum insured.
-- Extension: new expiry date.
-- Premium adjustment: no extra field.
-- Cancellation: no premium field. The page shows "Return premium is calculated automatically." The server calculates the refund.
-
-Premium changes are entered as signed decimal text and sent as strings. Dates are entered explicitly, and the form does not restrict them, so backdated entries are allowed. The frontend does not calculate any premium or refund.
-
-Only the fields for the selected type are sent, and the form never sends stale values from another type. Basic checks (required fields, a positive whole endorsement number) run in the browser. Business rules come from the backend. A 400 response is shown next to the matching field. Changes errors appear next to the visible type-specific field, or next to the type selector when no such field is shown. Contract and other errors appear in an alert. Entered values are kept after a failure. A new submission or a type change clears the previous errors. Submission is disabled while the request is in progress, and failed requests are not retried automatically.
-
-After a successful save, the form resets and the page shows "Endorsement added." The history is then reloaded with a GET request, and the position for the selected date is reloaded after that. While the history refresh is pending, the form is disabled and the position and AGREED application indicators are hidden. The form is enabled again only when the history refresh succeeds, so the suggested endorsement number comes from the fresh history. A cleared comparison date stays cleared, and no position is fetched for it. If the refresh fails, the success message stays visible with a "Retry refresh" button, the form stays disabled, and the page does not suggest submitting again. Retry refresh repeats only GET requests.
-
-Premium errors from the server are shown under the automatic-return-premium note for cancellations.
-
-Status: endorsement creation from the detail screen is implemented. Editing or deleting existing endorsements and contract creation from the UI are not implemented.
-
-The page is built with Bootstrap CSS only, imported once in `frontend/src/main.tsx`.
-
-## Setup
-
-### Prerequisites
-
-- Python 3.11 or later
-- Node.js 18 or later
-- [uv](https://docs.astral.sh/uv/) for Python package management
-
-### Install Backend Dependencies
-
-```bash
-cd backend
-uv sync --locked
-```
-
-### Install Frontend Dependencies
-
-```bash
-cd frontend
-npm ci
-```
-
-## Development
-
-Run the backend and frontend in **separate terminal windows**.
-
-### Backend
-
-```bash
-cd backend
-uv run python manage.py migrate
-uv run python manage.py runserver
-```
-
-The API will be available at `http://127.0.0.1:8000/`.
-
-### Frontend
-
-```bash
-cd frontend
-npm run dev
-```
-
-The application will be available at `http://127.0.0.1:5173/` with API requests proxied to the backend.
-
-## Testing
-
-### Backend Tests
-
-```bash
-cd backend
-uv run python manage.py test
-```
-
-### Frontend Build
-
-```bash
-cd frontend
-npm run build
-```
+- Use PostgreSQL `NUMERIC` for monetary storage in production, so every model-valid amount round-trips exactly.
+- Add browser tests for the contract screens and the endorsement form.
+- Add endorsement editing and voiding, with an audit trail of changes.
+- Add authentication and contract-level permissions.
+- Make creation atomic under concurrent requests, for example with row locks.
+- Add pagination to the contract list.
 
 ## Status
 
-Phase 1: Reproducible backend and frontend setup complete.
+- Backend: contract and endorsement models, position calculation, creation rules, REST API, sample import and tests are implemented.
+- Frontend: contracts list, detail with date comparison, and endorsement form are implemented. `npm run build` passes.
+- Backend tests: `uv run python manage.py test` runs 126 tests, all passing, in a clean checkout of the verification branch. `check` and `makemigrations --check --dry-run` report no issues.
+- Sample import on an empty disposable database: 3 contracts loaded and 1 rejected; 7 endorsements loaded and 4 rejected. Re-importing loads nothing and leaves the records unchanged.
+- API smoke checks against a new disposable database: 31 of 31 passed. They cover the five API operations, date filtering, number order, drafts, the Harbour cancellation refund of -35671.23, the Marine extension and backdated adjustment, field-level 400 errors, 404 for unknown contracts, and unchanged records after rejected requests.
+- Frontend: `npm ci` and `npm run build` pass in a clean checkout.
+- **Browser verification has not been performed.** Both the list-to-detail screens and the endorsement form are unverified in a real browser. The checklist below is the manual test to run before submission. HTTP checks and a passing build are not browser checks.
+
+### Manual browser checklist
+
+Run both terminals from Setup, using a disposable database, and check:
+
+1. The list shows three contracts; selecting Harbour opens its detail, and "Back to contracts" returns to the list.
+2. Harbour shows the original name "Harbour Logistics Ltd" and the amended name "Harbour Logistics Group Ltd" with a "Changed" label.
+3. The date 2025-12-31 shows no endorsements applied and the original gross.
+4. 2026-09-29 shows BOUND; 2026-09-30 shows CANCELLED with expiry 2026-09-29.
+5. A DRAFT row is labelled "Not applied" on every date.
+6. Typing dates quickly always shows the position for the last date entered, and clearing the date shows "Select a date to view the position."
+7. Switching the endorsement type shows only the matching fields. A cancellation hides the premium input and shows the automatic-return-premium note.
+8. A duplicate endorsement number or an invalid date shows an error next to that field, and the entered values are kept.
+9. A successful save adds a row to the history, keeps the selected date, and updates the suggested number.
+10. The form is disabled while the save is in progress, and it stays disabled while the refresh runs.
+11. Stopping the backend and pressing Retry shows an error, and Retry works after the backend restarts.
+12. At a narrow width, the tables scroll horizontally and the comparison columns stack.
