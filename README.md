@@ -31,7 +31,7 @@ A Django REST API and React application for managing insurance contracts and the
 Assumptions:
 - `mga_reference` is unique across contracts.
 - `currency` is an ISO-style three-letter uppercase ASCII code (e.g. `USD`).
-- Amounts are `Decimal` values with two decimal places and are never negative.
+- `sum_insured` and `gross_premium` are never negative. Negativity is checked before rounding, so `-0.001` is rejected. Accepted inputs are `Decimal` values, integers and decimal strings; floats, malformed text and non-finite values are rejected. Accepted amounts are rounded to two decimal places using `ROUND_HALF_UP` (e.g. `100.005` is stored as `100.01`, `100.004` as `100.00`) before validation and storage.
 - `brokerage_pct` and `signed_line_pct` are between 0 and 100 inclusive.
 - `expiry_date` is on or after `inception_date`; a same-day cover is allowed.
 - `status` has a single allowed value, `BOUND`.

@@ -126,6 +126,62 @@ class ContractCreationTests(TestCase):
         self.assertEqual(Contract.objects.count(), 0)
 
 
+class ContractMoneyRoundingTests(TestCase):
+    def test_half_up_rounding_on_initial_save(self):
+        cases = [
+            ("gross_premium", Decimal("100.005"), "100.01"),
+            ("sum_insured", Decimal("100.005"), "100.01"),
+            ("gross_premium", Decimal("100.004"), "100.00"),
+            ("sum_insured", Decimal("100.004"), "100.00"),
+            ("gross_premium", "100.005", "100.01"),
+            ("sum_insured", "100.005", "100.01"),
+        ]
+        for index, (field, value, expected) in enumerate(cases):
+            with self.subTest(field=field, value=value):
+                build_contract(
+                    mga_reference=f"MGA-ROUND-{index}", **{field: value}
+                ).save()
+                stored = Contract.objects.filter(mga_reference=f"MGA-ROUND-{index}")
+                self.assertEqual(
+                    stored.values_list(field, flat=True).get(), Decimal(expected)
+                )
+
+    def test_negative_amounts_rejected_before_rounding(self):
+        for field in ("sum_insured", "gross_premium"):
+            for value in (Decimal("-0.001"), "-0.001"):
+                with self.subTest(field=field, value=value):
+                    with self.assertRaises(ValidationError) as ctx:
+                        build_contract(**{field: value}).save()
+
+                    self.assertIn(field, ctx.exception.message_dict)
+
+        self.assertEqual(Contract.objects.count(), 0)
+
+    def test_malformed_and_non_finite_amounts_rejected(self):
+        invalid_values = [
+            "abc",
+            "",
+            "1,000.00",
+            "NaN",
+            "sNaN",
+            "Infinity",
+            "-Infinity",
+            "1E+40",
+            100.5,
+            None,
+            True,
+        ]
+        for field in ("sum_insured", "gross_premium"):
+            for value in invalid_values:
+                with self.subTest(field=field, value=value):
+                    with self.assertRaises(ValidationError) as ctx:
+                        build_contract(**{field: value}).save()
+
+                    self.assertIn(field, ctx.exception.message_dict)
+
+        self.assertEqual(Contract.objects.count(), 0)
+
+
 class ContractImmutabilityTests(TestCase):
     def setUp(self):
         self.contract = build_contract()
