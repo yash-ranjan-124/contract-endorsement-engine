@@ -223,7 +223,15 @@ On an empty database the sample produces:
 - Contracts: 3 loaded, 1 rejected (`MNK-PR-2026-004`, expiry before inception).
 - Endorsements: 7 loaded, 4 rejected (row 5 effective after the cancellation, row 9 duplicate number 3, row 10 before inception, row 11 unknown contract).
 
-The import never overwrites or deletes. Running it again on the same database rejects every row as a duplicate: 0 contracts loaded and 4 rejected, and 0 endorsements loaded and 11 rejected. Existing records are unchanged.
+The import never overwrites or deletes. Running it again on the same database loads nothing: 0 contracts loaded and 4 rejected, and 0 endorsements loaded and 11 rejected. Not every rejection is a duplicate. Three contract rows and eight endorsement rows are rejected as duplicate references or numbers; the remaining rows (contract row 4, endorsement rows 5, 10 and 11) fail their own validation rules again. Existing records are unchanged.
+
+## Contracts List (Frontend)
+
+The React app shows one row per contract from `GET /api/contracts/`, in reference order. Each row shows the current insured name, status, cover period, currency and gross premium, as returned by the backend. The UI does not calculate premiums or infer statuses. Money is displayed as the exact string returned, with two decimals.
+
+The page has four states: loading, empty (with the sample import command), error (with a Retry button), and the contracts table. Requests are cancelled when the component unmounts, so cancelled requests do not show errors or update state.
+
+The page is built with Bootstrap CSS only, imported once in `frontend/src/main.tsx`. There is no contract detail, creation form, or endorsement form yet.
 
 ## Setup
 
