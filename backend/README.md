@@ -44,12 +44,12 @@ uv run python manage.py test
   - `asgi.py` — ASGI application for async deployment.
   - `wsgi.py` — WSGI application for traditional deployment.
 - `contracts/` — Django app for contract and endorsement management.
-  - `models.py` — Database models (to be implemented).
+  - `models.py` — `Contract` model for original bound slips.
   - `admin.py` — Django admin interface (to be implemented).
   - `views.py` — API viewsets (to be implemented).
   - `serializers.py` — DRF serializers for API schemas (to be implemented).
   - `urls.py` — App-specific URL routing (to be implemented).
-  - `tests.py` — Unit and integration tests (to be implemented).
+  - `tests.py` — Contract validation and immutability tests.
 
 ## Notes
 
