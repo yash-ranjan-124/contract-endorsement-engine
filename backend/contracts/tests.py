@@ -1680,6 +1680,24 @@ class ContractReadApiTests(TestCase):
         self.assertEqual(detail["endorsements"][0]["premium_change"], "-30575.34")
         self.assertEqual(detail["endorsements"][0]["effective_date"], "2026-09-30")
 
+    def test_amended_premium_totals_exceed_model_precision(self):
+        contract = self.make_contract(
+            gross_premium=Decimal("9999999999999999.99"),
+            brokerage_pct=Decimal("0.00"),
+            signed_line_pct=Decimal("100.00"),
+        )
+        self.make_endorsement(contract, 1, premium_change=Decimal("0.01"), effective_date=date(2026, 3, 1))
+
+        response = self.client.get(
+            "/api/contracts/MGA-2026-0001/position/", {"as_at": "2026-06-15"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        for field in ("gross_premium", "net_premium", "our_net_premium"):
+            with self.subTest(field=field):
+                self.assertEqual(data[field], "10000000000000000.00")
+
     def test_get_requests_leave_database_unchanged(self):
         contract = self.make_contract()
         self.make_endorsement(contract, 1, effective_date=date(2026, 3, 1), premium_change=Decimal("100.00"))
