@@ -47,6 +47,16 @@ Assumptions:
 - Business rules are deferred: cover-date checks, type-specific validation of `changes`, and position calculations are not enforced by the model.
 - Endorsements have no immutability rule yet.
 
+### Contract Position
+
+`calculate_position(contract, endorsements, as_at)` in `contracts/services.py` calculates a read-only position for a date. The caller loads the records; the function does not query or write the database.
+
+- Only `AGREED` endorsements with `effective_date <= as_at` are applied. The effective date is inclusive. `recorded_date` is not used for filtering, so backdated endorsements apply from their effective date.
+- Nothing is applied when `as_at` is before the contract's inception date.
+- Endorsements are applied in ascending `endorsement_number`, regardless of input order or effective-date order. When two changes touch the same field, the higher number wins.
+- A cancellation sets the status to `CANCELLED`, sets the cancellation date, and ends expiry the day before. Its stored `premium_change` is applied. A missing refund raises `ValueError`; it is never treated as zero.
+- Financial rounding uses `ROUND_HALF_UP` to two decimals. Gross premium is rounded first. `net_premium` is gross after brokerage, and `our_net_premium` is calculated from the unrounded net share and then rounded, so net is not rounded before the share is calculated.
+
 ## Setup
 
 ### Prerequisites
