@@ -3,6 +3,7 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from contracts.models import Endorsement
 
+ZERO = Decimal("0")
 ONE = Decimal("1")
 HUNDRED = Decimal("100")
 CENT = Decimal("0.01")
@@ -46,6 +47,31 @@ def calculate_position(contract, endorsements, as_at):
     position["net_premium"] = _round_money(raw_net)
     position["our_net_premium"] = _round_money(raw_net * contract.signed_line_pct / HUNDRED)
     return position
+
+
+def calculate_cancellation_premium_change(contract, endorsements, effective_date):
+    if effective_date < contract.inception_date:
+        raise ValueError("Cancellation effective date cannot be before inception.")
+    history = [
+        endorsement
+        for endorsement in endorsements
+        if endorsement.type != Endorsement.Type.CANCELLATION
+    ]
+    position = calculate_position(contract, history, effective_date)
+    gross = position["gross_premium"]
+    expiry = position["expiry_date"]
+    if effective_date > expiry:
+        raise ValueError(
+            "Cancellation effective date cannot be after the pre-cancellation expiry."
+        )
+    if gross < ZERO:
+        raise ValueError("Pre-cancellation gross premium cannot be negative.")
+    if gross == ZERO:
+        return Decimal("0.00")
+    total_days = (expiry - contract.inception_date).days + 1
+    unused_days = (expiry - effective_date).days + 1
+    refund = gross * Decimal(unused_days) / Decimal(total_days)
+    return -_round_money(refund)
 
 
 def _applicable_endorsements(contract, endorsements, as_at):
