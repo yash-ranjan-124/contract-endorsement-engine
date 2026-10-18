@@ -3,10 +3,14 @@ from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db.models import ProtectedError
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 
 from contracts.models import Endorsement, Contract
-from contracts.services import calculate_cancellation_premium_change, calculate_position
+from contracts.services import (
+    calculate_cancellation_premium_change,
+    calculate_position,
+    validate_endorsement_changes,
+)
 
 
 def valid_contract_data(**overrides):
@@ -1001,3 +1005,211 @@ class CancellationCalculationTests(TestCase):
         self.assertEqual(after["our_net_premium"], Decimal("23473.97"))
         self.assertEqual(after["applied_endorsements"], [1, 2])
         self.assertEqual(cancellation.premium_change, Decimal("-35671.23"))
+
+
+class EndorsementChangesValidationTests(SimpleTestCase):
+    def assertChangesError(self, endorsement_type, changes, fragment=None):
+        with self.assertRaises(ValidationError) as ctx:
+            validate_endorsement_changes(endorsement_type, changes)
+        messages = ctx.exception.message_dict["changes"]
+        if fragment is not None:
+            self.assertTrue(
+                any(fragment in message for message in messages),
+                f"{messages!r} does not mention {fragment!r}",
+            )
+        return messages
+
+    def test_valid_normalized_payload_for_every_type(self):
+        cases = [
+            (
+                Endorsement.Type.CHANGE_DETAILS,
+                {"insured_name": "  Acme Logistics Ltd  "},
+                {"insured_name": "Acme Logistics Ltd"},
+            ),
+            (
+                Endorsement.Type.CHANGE_SUM_INSURED,
+                {"sum_insured": "1250000.005"},
+                {"sum_insured": "1250000.01"},
+            ),
+            (
+                Endorsement.Type.EXTENSION,
+                {"expiry_date": "2027-03-31"},
+                {"expiry_date": "2027-03-31"},
+            ),
+            (Endorsement.Type.PREMIUM_ADJUSTMENT, {}, {}),
+            (Endorsement.Type.CANCELLATION, {}, {}),
+        ]
+        self.assertEqual(
+            {endorsement_type for endorsement_type, _, _ in cases},
+            set(Endorsement.Type.values),
+        )
+        for endorsement_type, changes, expected in cases:
+            with self.subTest(type=endorsement_type):
+                self.assertEqual(
+                    validate_endorsement_changes(endorsement_type, changes), expected
+                )
+
+    def test_unknown_type_rejected(self):
+        with self.assertRaises(ValidationError) as ctx:
+            validate_endorsement_changes("UNKNOWN", {})
+
+        self.assertIn("type", ctx.exception.message_dict)
+
+    def test_non_object_changes_rejected(self):
+        for value in (None, [], ["insured_name"], "text", 1):
+            with self.subTest(value=value):
+                self.assertChangesError(
+                    Endorsement.Type.CHANGE_DETAILS, value, "JSON object"
+                )
+        with self.subTest(type=Endorsement.Type.PREMIUM_ADJUSTMENT):
+            self.assertChangesError(
+                Endorsement.Type.PREMIUM_ADJUSTMENT, [], "JSON object"
+            )
+
+    def test_missing_keys_rejected(self):
+        cases = [
+            (Endorsement.Type.CHANGE_DETAILS, "insured_name"),
+            (Endorsement.Type.CHANGE_SUM_INSURED, "sum_insured"),
+            (Endorsement.Type.EXTENSION, "expiry_date"),
+        ]
+        for endorsement_type, key in cases:
+            with self.subTest(type=endorsement_type):
+                self.assertChangesError(endorsement_type, {}, f"'{key}'")
+
+    def test_wrong_and_extra_keys_rejected(self):
+        messages = self.assertChangesError(
+            Endorsement.Type.CHANGE_DETAILS, {"name": "Acme"}, "'insured_name'"
+        )
+        self.assertTrue(any("'name'" in message for message in messages))
+
+        self.assertChangesError(
+            Endorsement.Type.CHANGE_DETAILS,
+            {"insured_name": "Acme", "extra": 1},
+            "'extra'",
+        )
+        self.assertChangesError(
+            Endorsement.Type.PREMIUM_ADJUSTMENT, {"reason": "x"}, "'reason'"
+        )
+        self.assertChangesError(
+            Endorsement.Type.CANCELLATION, {"expiry_date": "2027-01-01"}, "'expiry_date'"
+        )
+
+    def test_invalid_insured_names_rejected(self):
+        cases = [
+            ("", "blank"),
+            ("   ", "blank"),
+            (123, "string"),
+            (None, "string"),
+            ("A" * 256, "at most 255"),
+        ]
+        for value, fragment in cases:
+            with self.subTest(value=value):
+                self.assertChangesError(
+                    Endorsement.Type.CHANGE_DETAILS,
+                    {"insured_name": value},
+                    fragment,
+                )
+
+    def test_insured_name_at_max_length_accepted(self):
+        result = validate_endorsement_changes(
+            Endorsement.Type.CHANGE_DETAILS, {"insured_name": "A" * 255}
+        )
+
+        self.assertEqual(result, {"insured_name": "A" * 255})
+
+    def test_sum_insured_rounds_half_up_to_fixed_string(self):
+        cases = [
+            ("100.005", "100.01"),
+            (Decimal("100.004"), "100.00"),
+            (5, "5.00"),
+            ("0", "0.00"),
+            ("9999999999999999.99", "9999999999999999.99"),
+        ]
+        for value, expected in cases:
+            with self.subTest(value=value):
+                result = validate_endorsement_changes(
+                    Endorsement.Type.CHANGE_SUM_INSURED, {"sum_insured": value}
+                )
+                self.assertEqual(result, {"sum_insured": expected})
+                self.assertIsInstance(result["sum_insured"], str)
+
+    def test_sum_insured_invalid_values_rejected(self):
+        cases = [
+            Decimal("-0.001"),
+            "-0.001",
+            "abc",
+            "",
+            "NaN",
+            "sNaN",
+            "Infinity",
+            "-Infinity",
+            "1E+40",
+            100.5,
+            True,
+            None,
+        ]
+        for value in cases:
+            with self.subTest(value=value):
+                self.assertChangesError(
+                    Endorsement.Type.CHANGE_SUM_INSURED,
+                    {"sum_insured": value},
+                    "sum_insured",
+                )
+
+    def test_sum_insured_field_overflow_rejected(self):
+        cases = [
+            "10000000000000000.00",
+            "9999999999999999.995",
+        ]
+        for value in cases:
+            with self.subTest(value=value):
+                self.assertChangesError(
+                    Endorsement.Type.CHANGE_SUM_INSURED,
+                    {"sum_insured": value},
+                    "must not exceed",
+                )
+
+    def test_invalid_and_noncanonical_dates_rejected(self):
+        cases = [
+            "2027-02-30",
+            "31-03-2027",
+            "2027/03/31",
+            "20270331",
+            "2027-3-31",
+            " 2027-03-31",
+            "",
+            None,
+            20270331,
+        ]
+        for value in cases:
+            with self.subTest(value=value):
+                self.assertChangesError(
+                    Endorsement.Type.EXTENSION,
+                    {"expiry_date": value},
+                    "YYYY-MM-DD",
+                )
+
+    def test_nonempty_payload_rejected_for_premium_adjustment_and_cancellation(self):
+        for endorsement_type in (
+            Endorsement.Type.PREMIUM_ADJUSTMENT,
+            Endorsement.Type.CANCELLATION,
+        ):
+            with self.subTest(type=endorsement_type):
+                self.assertChangesError(
+                    endorsement_type, {"insured_name": "Acme"}, "'insured_name'"
+                )
+
+    def test_input_dictionary_remains_unchanged(self):
+        cases = [
+            (Endorsement.Type.CHANGE_DETAILS, {"insured_name": "  Acme  "}),
+            (Endorsement.Type.CHANGE_SUM_INSURED, {"sum_insured": "100.005"}),
+            (Endorsement.Type.EXTENSION, {"expiry_date": "2027-03-31"}),
+            (Endorsement.Type.PREMIUM_ADJUSTMENT, {}),
+        ]
+        for endorsement_type, changes in cases:
+            with self.subTest(type=endorsement_type):
+                original = dict(changes)
+                result = validate_endorsement_changes(endorsement_type, changes)
+
+                self.assertEqual(changes, original)
+                self.assertIsNot(result, changes)

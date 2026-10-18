@@ -42,10 +42,19 @@ Assumptions:
 `Endorsement` records a numbered change to a `Contract`. Each endorsement belongs to one contract (`contract.endorsements`), and deleting a contract that has endorsements is blocked.
 
 - `endorsement_number` is unique within a contract and starts at 1. The same number may be used by different contracts.
-- `premium_change` is signed: positive increases premium, negative reduces it. Values are rounded to two decimals using `ROUND_HALF_UP`, so `-100.005` is stored as `-100.01`. It may be empty only for `CANCELLATION`; the cancellation calculation that fills it in is not implemented yet.
-- `changes` must be a JSON object. `{}` is valid. Its contents are not validated yet.
-- Business rules are deferred: cover-date checks, type-specific validation of `changes`, and position calculations are not enforced by the model.
+- `premium_change` is signed: positive increases premium, negative reduces it. Values are rounded to two decimals using `ROUND_HALF_UP`, so `-100.005` is stored as `-100.01`. It may be empty only for `CANCELLATION`. The refund for a cancellation is calculated by `calculate_cancellation_premium_change()`, but creation does not yet wire that calculation into the stored value.
+- `changes` must be a JSON object. `{}` is valid. Its contents are checked by the type-specific validator described below, not by the model.
 - Endorsements have no immutability rule yet.
+
+Validation has two layers:
+
+- **Structural model validation** runs in `Endorsement.save()` through `full_clean()`. It covers the contract link, the number range and uniqueness, choice fields, required dates and amounts, and the rule that `changes` is a JSON object.
+- **Type-specific validation** is `validate_endorsement_changes(endorsement_type, changes)` in `contracts/services.py`. It returns a fresh normalized dictionary and does not query or write the database. It is not called from `save()` yet; the shared creation service will call it in a later step.
+  - `CHANGE_DETAILS` requires exactly `insured_name`: a string, trimmed, not blank, and at most 255 characters.
+  - `CHANGE_SUM_INSURED` requires exactly `sum_insured`: rounded half-up to two decimals, rejected if negative, and returned as a fixed two-decimal string within the field capacity.
+  - `EXTENSION` requires exactly `expiry_date` in canonical `YYYY-MM-DD` form. Whether it extends the current cover is not checked yet.
+  - `PREMIUM_ADJUSTMENT` and `CANCELLATION` require an empty `changes` object.
+  - Missing keys and unexpected keys are both rejected. Unexpected keys are reported by name so that stray payload fields cannot be stored silently.
 
 ### Contract Position
 
