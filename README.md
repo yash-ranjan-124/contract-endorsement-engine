@@ -208,6 +208,23 @@ Errors are `400` with one list of messages per field, for example:
 
 Unknown contracts on the endorsement route return `400` with an `mga_reference` error. Unsupported methods return `405`.
 
+## Sample Data Import
+
+`backend/sample_data/` contains a sample contract file and a sample endorsement file. Import them from `backend/`:
+
+```bash
+uv run python manage.py import_data sample_data/contracts.json sample_data/endorsements.json
+```
+
+Both files are read and checked for valid JSON and top-level arrays before anything is written. Contracts are imported first, then endorsements, each in file order. Each row runs in its own transaction, so one rejected row does not stop the rest. Each rejection prints the row number, the reference, and the field-level reasons.
+
+On an empty database the sample produces:
+
+- Contracts: 3 loaded, 1 rejected (`MNK-PR-2026-004`, expiry before inception).
+- Endorsements: 7 loaded, 4 rejected (row 5 effective after the cancellation, row 9 duplicate number 3, row 10 before inception, row 11 unknown contract).
+
+The import never overwrites or deletes. Running it again on the same database rejects every row as a duplicate: 0 contracts loaded and 4 rejected, and 0 endorsements loaded and 11 rejected. Existing records are unchanged.
+
 ## Setup
 
 ### Prerequisites
