@@ -1,9 +1,11 @@
 from datetime import date
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.core.exceptions import ValidationError
 from django.db.models import ProtectedError
 from django.test import SimpleTestCase, TestCase
+from rest_framework.test import APIClient
 
 from contracts.models import Endorsement, Contract
 from contracts.services import (
@@ -1469,3 +1471,256 @@ class EndorsementChangesValidationTests(SimpleTestCase):
 
                 self.assertEqual(changes, original)
                 self.assertIsNot(result, changes)
+
+
+TODAY = date(2026, 6, 15)
+
+
+class ContractReadApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        patcher = patch("django.utils.timezone.localdate", return_value=TODAY)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def make_contract(self, reference="MGA-2026-0001", **overrides):
+        values = {"gross_premium": Decimal("120000.00")}
+        values.update(overrides)
+        contract = build_contract(mga_reference=reference, **values)
+        contract.save()
+        return contract
+
+    def make_endorsement(self, contract, number, **overrides):
+        return create_endorsement(
+            contract.mga_reference, creation_data(endorsement_number=number, **overrides)
+        )
+
+    def test_empty_list_returns_empty_array(self):
+        response = self.client.get("/api/contracts/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+
+    def test_list_returns_amended_values_ordered_by_reference(self):
+        later = self.make_contract("MGA-2026-0002")
+        first = self.make_contract("MGA-2026-0001")
+        self.make_endorsement(
+            first,
+            1,
+            type=Endorsement.Type.CHANGE_DETAILS,
+            changes={"insured_name": "Renamed Ltd"},
+            effective_date=date(2026, 3, 1),
+        )
+        self.make_endorsement(
+            first,
+            2,
+            type=Endorsement.Type.CHANGE_SUM_INSURED,
+            changes={"sum_insured": "1250000.005"},
+            effective_date=date(2026, 3, 1),
+        )
+        self.make_endorsement(
+            first,
+            3,
+            type=Endorsement.Type.PREMIUM_ADJUSTMENT,
+            premium_change=Decimal("-100.005"),
+            effective_date=date(2026, 3, 1),
+        )
+
+        response = self.client.get("/api/contracts/")
+
+        data = response.json()
+        self.assertEqual(
+            [item["mga_reference"] for item in data],
+            ["MGA-2026-0001", "MGA-2026-0002"],
+        )
+        self.assertEqual(data[0]["insured_name"], "Renamed Ltd")
+        self.assertEqual(data[0]["sum_insured"], "1250000.01")
+        self.assertEqual(data[0]["gross_premium"], "119899.99")
+        self.assertEqual(data[0]["net_premium"], "107909.99")
+        self.assertEqual(data[0]["our_net_premium"], "26977.50")
+        self.assertEqual(data[0]["applied_endorsements"], [1, 2, 3])
+        self.assertEqual(data[1]["gross_premium"], "120000.00")
+        self.assertEqual(data[1]["applied_endorsements"], [])
+
+    def test_list_uses_fixed_number_of_queries(self):
+        for index in range(3):
+            contract = self.make_contract(f"MGA-2026-000{index}")
+            self.make_endorsement(contract, 1, premium_change=Decimal("10.00"))
+
+        with self.assertNumQueries(2):
+            response = self.client.get("/api/contracts/")
+
+        self.assertEqual(len(response.json()), 3)
+
+    def test_detail_returns_original_slip_history_with_drafts_and_current_position(self):
+        contract = self.make_contract()
+        self.make_endorsement(
+            contract,
+            2,
+            status=Endorsement.Status.DRAFT,
+            type=Endorsement.Type.CHANGE_DETAILS,
+            changes={"insured_name": "Draft Name"},
+            effective_date=date(2026, 3, 1),
+        )
+        self.make_endorsement(
+            contract,
+            1,
+            type=Endorsement.Type.CHANGE_DETAILS,
+            changes={"insured_name": "Agreed Name"},
+            effective_date=date(2026, 3, 1),
+        )
+
+        response = self.client.get("/api/contracts/MGA-2026-0001/")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(set(data), {"slip", "endorsements", "current_position"})
+        self.assertEqual(data["slip"]["insured_name"], "Acme Logistics Ltd")
+        self.assertEqual([e["number"] for e in data["endorsements"]], [1, 2])
+        self.assertEqual(data["endorsements"][1]["status"], "DRAFT")
+        self.assertEqual(data["endorsements"][1]["changes"], {"insured_name": "Draft Name"})
+        self.assertEqual(data["endorsements"][0]["premium_change"], "0.00")
+        self.assertEqual(data["current_position"]["insured_name"], "Agreed Name")
+        self.assertEqual(data["current_position"]["applied_endorsements"], [1])
+
+    def test_position_with_explicit_date_filters_by_effective_date(self):
+        contract = self.make_contract()
+        self.make_endorsement(
+            contract,
+            1,
+            effective_date=date(2026, 3, 1),
+            premium_change=Decimal("1000.00"),
+        )
+
+        before = self.client.get(
+            "/api/contracts/MGA-2026-0001/position/", {"as_at": "2026-02-28"}
+        ).json()
+        on_date = self.client.get(
+            "/api/contracts/MGA-2026-0001/position/", {"as_at": "2026-03-01"}
+        ).json()
+
+        self.assertEqual(set(before), {
+            "mga_reference", "as_at", "insured_name", "status", "inception_date",
+            "expiry_date", "cancellation_effective_date", "currency", "sum_insured",
+            "gross_premium", "net_premium", "our_net_premium", "applied_endorsements",
+        })
+        self.assertEqual(before["as_at"], "2026-02-28")
+        self.assertEqual(before["applied_endorsements"], [])
+        self.assertEqual(before["gross_premium"], "120000.00")
+        self.assertEqual(on_date["as_at"], "2026-03-01")
+        self.assertEqual(on_date["applied_endorsements"], [1])
+        self.assertEqual(on_date["gross_premium"], "121000.00")
+        self.assertEqual(on_date["net_premium"], "108900.00")
+        self.assertEqual(on_date["our_net_premium"], "27225.00")
+
+    def test_omitted_as_at_uses_today(self):
+        contract = self.make_contract()
+        self.make_endorsement(
+            contract,
+            1,
+            effective_date=date(2026, 6, 1),
+            premium_change=Decimal("500.00"),
+        )
+
+        response = self.client.get("/api/contracts/MGA-2026-0001/position/")
+
+        data = response.json()
+        self.assertEqual(data["as_at"], TODAY.isoformat())
+        self.assertEqual(data["applied_endorsements"], [1])
+        self.assertEqual(data["gross_premium"], "120500.00")
+
+    def test_invalid_as_at_returns_field_level_400(self):
+        self.make_contract()
+        for value in (
+            "",
+            "2026-02-30",
+            "2026-3-1",
+            "20260301",
+            "03-01-2026",
+            " 2026-03-01",
+            "2026-03-01T00:00:00",
+        ):
+            with self.subTest(value=value):
+                response = self.client.get(
+                    "/api/contracts/MGA-2026-0001/position/", {"as_at": value}
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("as_at", response.json())
+
+    def test_unknown_contract_returns_404(self):
+        for url in ("/api/contracts/MGA-MISSING/", "/api/contracts/MGA-MISSING/position/"):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, 404)
+
+    def test_money_dates_and_cancellation_null_are_serialized_as_strings(self):
+        contract = self.make_contract()
+        before = self.client.get("/api/contracts/MGA-2026-0001/").json()
+        self.assertIsNone(before["current_position"]["cancellation_effective_date"])
+        self.assertEqual(before["slip"]["inception_date"], "2026-01-01")
+        self.assertEqual(before["slip"]["brokerage_pct"], "10.00")
+        self.assertEqual(before["current_position"]["net_premium"], "108000.00")
+        self.assertEqual(before["current_position"]["our_net_premium"], "27000.00")
+
+        self.make_endorsement(
+            contract,
+            1,
+            type=Endorsement.Type.CANCELLATION,
+            effective_date=date(2026, 9, 30),
+        )
+        after = self.client.get(
+            "/api/contracts/MGA-2026-0001/position/", {"as_at": "2026-10-01"}
+        ).json()
+        detail = self.client.get("/api/contracts/MGA-2026-0001/").json()
+
+        self.assertEqual(after["status"], "CANCELLED")
+        self.assertEqual(after["cancellation_effective_date"], "2026-09-30")
+        self.assertEqual(after["expiry_date"], "2026-09-29")
+        self.assertEqual(after["gross_premium"], "89424.66")
+        self.assertEqual(detail["endorsements"][0]["premium_change"], "-30575.34")
+        self.assertEqual(detail["endorsements"][0]["effective_date"], "2026-09-30")
+
+    def test_amended_premium_totals_exceed_model_precision(self):
+        contract = self.make_contract(
+            gross_premium=Decimal("9999999999999999.99"),
+            brokerage_pct=Decimal("0.00"),
+            signed_line_pct=Decimal("100.00"),
+        )
+        self.make_endorsement(contract, 1, premium_change=Decimal("0.01"), effective_date=date(2026, 3, 1))
+
+        response = self.client.get(
+            "/api/contracts/MGA-2026-0001/position/", {"as_at": "2026-06-15"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        for field in ("gross_premium", "net_premium", "our_net_premium"):
+            with self.subTest(field=field):
+                self.assertEqual(data[field], "10000000000000000.00")
+
+    def test_get_requests_leave_database_unchanged(self):
+        contract = self.make_contract()
+        self.make_endorsement(contract, 1, effective_date=date(2026, 3, 1), premium_change=Decimal("100.00"))
+        contract_before = Contract.objects.values().get(pk=contract.pk)
+        records_before = list(Endorsement.objects.filter(contract=contract).values())
+
+        self.client.get("/api/contracts/")
+        self.client.get("/api/contracts/MGA-2026-0001/")
+        self.client.get("/api/contracts/MGA-2026-0001/position/", {"as_at": "2026-04-01"})
+
+        self.assertEqual(Contract.objects.values().get(pk=contract.pk), contract_before)
+        self.assertEqual(
+            list(Endorsement.objects.filter(contract=contract).values()),
+            records_before,
+        )
+
+    def test_write_methods_are_not_allowed(self):
+        self.make_contract()
+        for url in (
+            "/api/contracts/",
+            "/api/contracts/MGA-2026-0001/",
+            "/api/contracts/MGA-2026-0001/position/",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.post(url, {}).status_code, 405)
+                self.assertEqual(self.client.delete(url).status_code, 405)

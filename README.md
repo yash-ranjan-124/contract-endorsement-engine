@@ -96,6 +96,81 @@ Assumptions:
 - The duplicate-number check runs before model validation so that the error is field-level.
 - Malformed or unexpected keys in `data` are rejected by field name.
 
+## Read API
+
+Three read-only endpoints under `/api/`. Only `GET` is accepted; other methods return `405`. Positions are calculated on each request and never stored. "Today" is `timezone.localdate()`. Money is returned as fixed two-decimal strings, dates as ISO strings, and `cancellation_effective_date` is `null` unless the position is cancelled.
+
+- `GET /api/contracts/` returns today's position for every contract, ordered by `mga_reference`. There is no pagination.
+- `GET /api/contracts/<mga_reference>/` returns `slip` (the original contract fields), `endorsements` (every endorsement including drafts, in number order), and `current_position` (today's position). Unknown references return `404`.
+- `GET /api/contracts/<mga_reference>/position/?as_at=YYYY-MM-DD` returns the position on that date. Omitting `as_at` uses today. An empty, malformed or non-canonical value returns `400` with an `as_at` field error. Unknown references return `404`.
+
+Example, `GET /api/contracts/MGA-2026-0001/position/?as_at=2026-06-15` with one agreed premium adjustment of `500.00` effective 2026-03-01:
+
+```json
+{
+  "mga_reference": "MGA-2026-0001",
+  "as_at": "2026-06-15",
+  "insured_name": "Acme Logistics Ltd",
+  "status": "BOUND",
+  "inception_date": "2026-01-01",
+  "expiry_date": "2026-12-31",
+  "cancellation_effective_date": null,
+  "currency": "USD",
+  "sum_insured": "1000000.00",
+  "gross_premium": "120500.00",
+  "net_premium": "108450.00",
+  "our_net_premium": "27112.50",
+  "applied_endorsements": [1]
+}
+```
+
+Example, `GET /api/contracts/MGA-2026-0001/`:
+
+```json
+{
+  "slip": {
+    "mga_reference": "MGA-2026-0001",
+    "insured_name": "Acme Logistics Ltd",
+    "class_of_business": "Marine Cargo",
+    "inception_date": "2026-01-01",
+    "expiry_date": "2026-12-31",
+    "currency": "USD",
+    "sum_insured": "1000000.00",
+    "gross_premium": "120000.00",
+    "brokerage_pct": "10.00",
+    "signed_line_pct": "25.00",
+    "status": "BOUND"
+  },
+  "endorsements": [
+    {
+      "number": 1,
+      "type": "PREMIUM_ADJUSTMENT",
+      "status": "AGREED",
+      "effective_date": "2026-03-01",
+      "recorded_date": "2026-02-15",
+      "premium_change": "500.00",
+      "changes": {},
+      "reason": "Adjust premium for additional exposure"
+    }
+  ],
+  "current_position": {
+    "mga_reference": "MGA-2026-0001",
+    "as_at": "2026-06-15",
+    "insured_name": "Acme Logistics Ltd",
+    "status": "BOUND",
+    "inception_date": "2026-01-01",
+    "expiry_date": "2026-12-31",
+    "cancellation_effective_date": null,
+    "currency": "USD",
+    "sum_insured": "1000000.00",
+    "gross_premium": "120500.00",
+    "net_premium": "108450.00",
+    "our_net_premium": "27112.50",
+    "applied_endorsements": [1]
+  }
+}
+```
+
 ## Setup
 
 ### Prerequisites
