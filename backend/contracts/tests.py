@@ -1689,11 +1689,24 @@ class ContractReadApiTests(TestCase):
 
     def test_amended_premium_totals_exceed_model_precision(self):
         contract = self.make_contract(
-            gross_premium=Decimal("9999999999999999.99"),
+            gross_premium=Decimal("5000000000000000.00"),
             brokerage_pct=Decimal("0.00"),
             signed_line_pct=Decimal("100.00"),
         )
-        self.make_endorsement(contract, 1, premium_change=Decimal("0.01"), effective_date=date(2026, 3, 1))
+        endorsement = self.make_endorsement(
+            contract,
+            1,
+            premium_change=Decimal("5000000000000000.00"),
+            effective_date=date(2026, 3, 1),
+        )
+        self.assertEqual(
+            Contract.objects.get(pk=contract.pk).gross_premium,
+            Decimal("5000000000000000.00"),
+        )
+        self.assertEqual(
+            Endorsement.objects.get(pk=endorsement.pk).premium_change,
+            Decimal("5000000000000000.00"),
+        )
 
         response = self.client.get(
             "/api/contracts/MGA-2026-0001/position/", {"as_at": "2026-06-15"}
