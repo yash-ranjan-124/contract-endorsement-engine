@@ -229,9 +229,18 @@ The import never overwrites or deletes. Running it again on the same database lo
 
 The React app shows one row per contract from `GET /api/contracts/`, in reference order. Each row shows the current insured name, status, cover period, currency and gross premium, as returned by the backend. The UI does not calculate premiums or infer statuses. Money is displayed as the exact string returned, with two decimals.
 
-The page has four states: loading, empty (with the sample import command), error (with a Retry button), and the contracts table. Requests are cancelled when the component unmounts, so cancelled requests do not show errors or update state.
+The page has four states: loading, empty (`No contracts found.`), error (with a Retry button), and the contracts table. Setup and import instructions are kept in this README rather than in the UI. Requests are cancelled when the component unmounts, so cancelled requests do not show errors or update state.
 
-The page is built with Bootstrap CSS only, imported once in `frontend/src/main.tsx`. There is no contract detail, creation form, or endorsement form yet.
+Each reference is a button. Selecting one opens the contract detail (`GET /api/contracts/<reference>/`), and "Back to contracts" returns to the list. The detail shows:
+
+- The original slip: reference, class of business, insured name, status, cover dates, currency, sum insured, gross premium, brokerage percentage and signed-line percentage.
+- A position panel for a selected date. It starts with the current position from the detail response, so no extra request is made when the detail opens. Changing the date fetches `GET /api/contracts/<reference>/position/?as_at=YYYY-MM-DD`. Clearing the date sends no request and shows "Select a date to view the position." Dates before inception or after expiry are allowed.
+- Comparison with the original slip. Insured name, status, cover dates, currency, sum insured and gross premium are compared by their API strings. A differing value is shaded and labelled "Changed". Net premium and our net premium have no original figure in the slip, so they are shown without comparison.
+- Endorsement history in number order, with an Application status column. DRAFT rows are always "Not applied". AGREED rows show "Applied" or "Not applied on selected date" for the selected date. While the position is loading, failed or cleared, AGREED rows show no application status.
+
+Stale results are not shown. Each date change replaces the previous position immediately with a loading state and cancels the request in flight. A response is shown only when its `as_at` matches the selected date. Detail requests are cancelled when the detail view is left.
+
+The page is built with Bootstrap CSS only, imported once in `frontend/src/main.tsx`.
 
 ## Setup
 

@@ -7,8 +7,9 @@ type LoadState =
   | { kind: 'error'; message: string }
   | { kind: 'ready'; contracts: ContractPosition[] }
 
-const SAMPLE_IMPORT_COMMAND =
-  'uv run python manage.py import_data sample_data/contracts.json sample_data/endorsements.json'
+type ContractsListProps = {
+  onSelect: (reference: string) => void
+}
 
 function formatMoney(value: string): string {
   const [whole, fraction = ''] = value.split('.')
@@ -19,7 +20,7 @@ function statusBadgeClass(status: string): string {
   return status === 'CANCELLED' ? 'badge text-bg-danger' : 'badge text-bg-success'
 }
 
-export default function ContractsList() {
+export default function ContractsList({ onSelect }: ContractsListProps) {
   const [state, setState] = useState<LoadState>({ kind: 'loading' })
   const [attempt, setAttempt] = useState(0)
 
@@ -69,8 +70,7 @@ export default function ContractsList() {
   if (state.contracts.length === 0) {
     return (
       <div className="alert alert-info" role="status">
-        No contracts yet. Import the sample data from the backend folder with{' '}
-        <code>{SAMPLE_IMPORT_COMMAND}</code>.
+        No contracts found.
       </div>
     )
   }
@@ -93,7 +93,15 @@ export default function ContractsList() {
         <tbody>
           {state.contracts.map((contract) => (
             <tr key={contract.mga_reference}>
-              <td className="text-nowrap">{contract.mga_reference}</td>
+              <td className="text-nowrap">
+                <button
+                  type="button"
+                  className="btn btn-link p-0 text-start"
+                  onClick={() => onSelect(contract.mga_reference)}
+                >
+                  {contract.mga_reference}
+                </button>
+              </td>
               <td>{contract.insured_name}</td>
               <td>
                 <span className={statusBadgeClass(contract.status)}>{contract.status}</span>
