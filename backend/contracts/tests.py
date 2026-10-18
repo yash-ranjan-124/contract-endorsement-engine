@@ -6,7 +6,7 @@ from django.db.models import ProtectedError
 from django.test import TestCase
 
 from contracts.models import Endorsement, Contract
-from contracts.services import calculate_position
+from contracts.services import calculate_cancellation_premium_change, calculate_position
 
 
 def valid_contract_data(**overrides):
@@ -721,3 +721,283 @@ class PositionCalculationTests(TestCase):
             [endorsement.premium_change for endorsement in endorsements],
             premiums_before,
         )
+
+
+class CancellationCalculationTests(TestCase):
+    def setUp(self):
+        self.contract = build_contract(gross_premium=Decimal("120000.00"))
+        self.contract.save()
+
+    def endorsement(self, number, **overrides):
+        values = {
+            "status": Endorsement.Status.AGREED,
+            "premium_change": Decimal("0.00"),
+        }
+        values.update(overrides)
+        endorsement = build_endorsement(
+            self.contract, endorsement_number=number, **values
+        )
+        endorsement.save()
+        return endorsement
+
+    def adjustment(self, number, amount, **overrides):
+        values = {
+            "type": Endorsement.Type.PREMIUM_ADJUSTMENT,
+            "effective_date": date(2026, 3, 1),
+            "premium_change": amount,
+        }
+        values.update(overrides)
+        return self.endorsement(number, **values)
+
+    def test_sample_refund_with_agreed_adjustment(self):
+        adjustment = self.adjustment(1, Decimal("20000.00"))
+
+        refund = calculate_cancellation_premium_change(
+            self.contract, [adjustment], date(2026, 9, 30)
+        )
+
+        self.assertEqual(refund, Decimal("-35671.23"))
+
+    def test_cancellation_at_inception_refunds_full_premium(self):
+        refund = calculate_cancellation_premium_change(
+            self.contract, [], date(2026, 1, 1)
+        )
+
+        self.assertEqual(refund, Decimal("-120000.00"))
+
+    def test_cancellation_at_expiry_refunds_one_day(self):
+        refund = calculate_cancellation_premium_change(
+            self.contract, [], date(2026, 12, 31)
+        )
+
+        self.assertEqual(refund, Decimal("-328.77"))
+
+    def test_same_day_cover_refunds_full_premium(self):
+        same_day = build_contract(
+            mga_reference="MGA-SAME-DAY",
+            inception_date=date(2026, 6, 1),
+            expiry_date=date(2026, 6, 1),
+            gross_premium=Decimal("15000.00"),
+        )
+        same_day.save()
+
+        refund = calculate_cancellation_premium_change(
+            same_day, [], date(2026, 6, 1)
+        )
+
+        self.assertEqual(refund, Decimal("-15000.00"))
+
+    def test_leap_year_uses_inclusive_day_counting(self):
+        leap = build_contract(
+            mga_reference="MGA-LEAP",
+            inception_date=date(2028, 1, 1),
+            expiry_date=date(2028, 12, 31),
+            gross_premium=Decimal("36600.00"),
+        )
+        leap.save()
+
+        refund = calculate_cancellation_premium_change(leap, [], date(2028, 7, 1))
+
+        self.assertEqual(refund, Decimal("-18400.00"))
+
+    def test_draft_and_future_premium_changes_are_excluded(self):
+        draft = self.adjustment(
+            1, Decimal("5000.00"), status=Endorsement.Status.DRAFT
+        )
+        future = self.adjustment(
+            2,
+            Decimal("7000.00"),
+            effective_date=date(2026, 10, 1),
+        )
+
+        refund = calculate_cancellation_premium_change(
+            self.contract, [draft, future], date(2026, 9, 30)
+        )
+
+        self.assertEqual(refund, Decimal("-30575.34"))
+
+    def test_same_day_agreed_premium_adjustment_is_included(self):
+        same_day = self.adjustment(
+            1, Decimal("20000.00"), effective_date=date(2026, 9, 30)
+        )
+
+        refund = calculate_cancellation_premium_change(
+            self.contract, [same_day], date(2026, 9, 30)
+        )
+
+        self.assertEqual(refund, Decimal("-35671.23"))
+
+    def test_effective_extension_changes_denominator_and_unused_days(self):
+        extension = self.endorsement(
+            1,
+            type=Endorsement.Type.EXTENSION,
+            effective_date=date(2026, 6, 1),
+            changes={"expiry_date": "2027-03-31"},
+        )
+
+        refund = calculate_cancellation_premium_change(
+            self.contract, [extension], date(2026, 9, 30)
+        )
+
+        self.assertEqual(refund, Decimal("-48263.74"))
+
+    def test_draft_and_future_extensions_do_not_change_refund(self):
+        draft = self.endorsement(
+            1,
+            type=Endorsement.Type.EXTENSION,
+            status=Endorsement.Status.DRAFT,
+            effective_date=date(2026, 6, 1),
+            changes={"expiry_date": "2027-06-30"},
+        )
+        future = self.endorsement(
+            2,
+            type=Endorsement.Type.EXTENSION,
+            effective_date=date(2026, 10, 1),
+            changes={"expiry_date": "2027-06-30"},
+        )
+
+        refund = calculate_cancellation_premium_change(
+            self.contract, [draft, future], date(2026, 9, 30)
+        )
+
+        self.assertEqual(refund, Decimal("-30575.34"))
+
+    def test_cancellations_in_history_are_excluded(self):
+        pending = self.endorsement(
+            1,
+            type=Endorsement.Type.CANCELLATION,
+            effective_date=date(2026, 9, 1),
+            premium_change=None,
+        )
+        previous = self.endorsement(
+            2,
+            type=Endorsement.Type.CANCELLATION,
+            effective_date=date(2026, 9, 15),
+            premium_change=Decimal("-5000.00"),
+        )
+
+        refund = calculate_cancellation_premium_change(
+            self.contract, [pending, previous], date(2026, 9, 30)
+        )
+
+        self.assertEqual(refund, Decimal("-30575.34"))
+
+    def test_zero_premium_returns_zero(self):
+        zero = build_contract(
+            mga_reference="MGA-ZERO", gross_premium=Decimal("0.00")
+        )
+        zero.save()
+
+        refund = calculate_cancellation_premium_change(
+            zero, [], date(2026, 9, 30)
+        )
+
+        self.assertEqual(str(refund), "0.00")
+
+    def test_invalid_boundaries_and_negative_gross_rejected(self):
+        with self.assertRaisesRegex(ValueError, "before inception"):
+            calculate_cancellation_premium_change(
+                self.contract, [], date(2025, 12, 31)
+            )
+        with self.assertRaisesRegex(ValueError, "after the pre-cancellation expiry"):
+            calculate_cancellation_premium_change(
+                self.contract, [], date(2027, 1, 1)
+            )
+
+        overdraw = self.adjustment(1, Decimal("-200000.00"))
+        with self.assertRaisesRegex(ValueError, "negative"):
+            calculate_cancellation_premium_change(
+                self.contract, [overdraw], date(2026, 9, 30)
+            )
+
+    def test_half_cent_refund_rounds_away_from_zero(self):
+        short = build_contract(
+            mga_reference="MGA-HALF-CENT",
+            inception_date=date(2026, 1, 1),
+            expiry_date=date(2026, 7, 19),
+            gross_premium=Decimal("1.00"),
+        )
+        short.save()
+        cases = [
+            (date(2026, 7, 19), Decimal("-0.01")),
+            (date(2026, 7, 17), Decimal("-0.02")),
+        ]
+        for effective_date, expected in cases:
+            with self.subTest(effective_date=effective_date):
+                refund = calculate_cancellation_premium_change(
+                    short, [], effective_date
+                )
+                self.assertEqual(refund, expected)
+
+    def test_inputs_and_records_remain_unchanged(self):
+        adjustment = self.adjustment(1, Decimal("20000.00"))
+        cancellation = self.endorsement(
+            2,
+            type=Endorsement.Type.CANCELLATION,
+            effective_date=date(2026, 9, 1),
+            premium_change=None,
+        )
+        endorsements = [cancellation, adjustment]
+        contract_before = Contract.objects.values().get(pk=self.contract.pk)
+        records_before = list(
+            Endorsement.objects.filter(contract=self.contract).values()
+        )
+        premiums_before = [endorsement.premium_change for endorsement in endorsements]
+
+        for effective_date in (
+            date(2026, 1, 1),
+            date(2026, 9, 30),
+            date(2026, 12, 31),
+        ):
+            calculate_cancellation_premium_change(
+                self.contract, endorsements, effective_date
+            )
+
+        self.assertEqual(
+            Contract.objects.values().get(pk=self.contract.pk), contract_before
+        )
+        self.assertEqual(
+            list(Endorsement.objects.filter(contract=self.contract).values()),
+            records_before,
+        )
+        self.assertEqual(
+            [endorsement.premium_change for endorsement in endorsements],
+            premiums_before,
+        )
+
+    def test_refund_recorded_as_cancellation_updates_position(self):
+        self.adjustment(1, Decimal("20000.00"))
+        adjustment = Endorsement.objects.get(
+            contract=self.contract, endorsement_number=1
+        )
+        cancellation_date = date(2026, 9, 30)
+
+        refund = calculate_cancellation_premium_change(
+            self.contract, [adjustment], cancellation_date
+        )
+        cancellation = self.endorsement(
+            2,
+            type=Endorsement.Type.CANCELLATION,
+            effective_date=cancellation_date,
+            premium_change=refund,
+        )
+        history = list(Endorsement.objects.filter(contract=self.contract))
+
+        before = calculate_position(
+            self.contract, history, date(2026, 9, 29)
+        )
+        after = calculate_position(self.contract, history, cancellation_date)
+
+        self.assertEqual(refund, Decimal("-35671.23"))
+        self.assertEqual(before["status"], "BOUND")
+        self.assertEqual(before["gross_premium"], Decimal("140000.00"))
+        self.assertEqual(before["net_premium"], Decimal("126000.00"))
+        self.assertEqual(before["our_net_premium"], Decimal("31500.00"))
+        self.assertEqual(after["status"], "CANCELLED")
+        self.assertEqual(after["cancellation_effective_date"], cancellation_date)
+        self.assertEqual(after["expiry_date"], date(2026, 9, 29))
+        self.assertEqual(after["gross_premium"], Decimal("104328.77"))
+        self.assertEqual(after["net_premium"], Decimal("93895.89"))
+        self.assertEqual(after["our_net_premium"], Decimal("23473.97"))
+        self.assertEqual(after["applied_endorsements"], [1, 2])
+        self.assertEqual(cancellation.premium_change, Decimal("-35671.23"))

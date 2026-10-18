@@ -57,6 +57,16 @@ Assumptions:
 - A cancellation sets the status to `CANCELLED`, sets the cancellation date, and ends expiry the day before. Its stored `premium_change` is applied. A missing refund raises `ValueError`; it is never treated as zero.
 - Financial rounding uses `ROUND_HALF_UP` to two decimals. Gross premium is rounded first. `net_premium` is gross after brokerage, and `our_net_premium` is calculated from the unrounded net share and then rounded, so net is not rounded before the share is calculated.
 
+### Cancellation Return Premium
+
+`calculate_cancellation_premium_change(contract, endorsements, effective_date)` returns the negative `premium_change` for a cancellation. It does not save anything.
+
+- The pre-cancellation position is calculated from all non-cancellation endorsements using `calculate_position()`, so the gross premium and expiry date reflect only agreed changes effective on or before the cancellation date.
+- The pre-cancellation expiry is the contract expiry, or the expiry set by an agreed extension effective on or before the cancellation date.
+- Formula: `refund = gross * unused_days / total_days`, where `total_days = (expiry - inception).days + 1` and `unused_days = (expiry - effective_date).days + 1`. The result is rounded `ROUND_HALF_UP` to two decimals and returned as a negative value.
+- A zero gross returns `0.00`. A date before inception, a date after the pre-cancellation expiry, or a negative gross raises `ValueError`.
+- The helper assumes the cancellation is otherwise eligible; restrictions on existing cancellations are not checked here.
+
 ## Setup
 
 ### Prerequisites
