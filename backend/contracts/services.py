@@ -2,6 +2,7 @@ from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 from django.core.exceptions import ValidationError
+from django.db import transaction
 
 from contracts.models import Contract, Endorsement, _normalize_money
 
@@ -17,6 +18,17 @@ SUM_INSURED_LIMIT = (
 )
 INSURED_NAME_MAX_LENGTH = Contract._meta.get_field("insured_name").max_length
 DATE_FORMAT_MESSAGE = "expiry_date must be a date in YYYY-MM-DD format."
+NEGATIVE_PRE_CANCELLATION_GROSS = "Pre-cancellation gross premium cannot be negative."
+CREATABLE_FIELDS = (
+    "endorsement_number",
+    "type",
+    "status",
+    "effective_date",
+    "recorded_date",
+    "premium_change",
+    "changes",
+    "reason",
+)
 
 
 def _round_money(value):
@@ -75,7 +87,7 @@ def calculate_cancellation_premium_change(contract, endorsements, effective_date
             "Cancellation effective date cannot be after the pre-cancellation expiry."
         )
     if gross < ZERO:
-        raise ValueError("Pre-cancellation gross premium cannot be negative.")
+        raise ValueError(NEGATIVE_PRE_CANCELLATION_GROSS)
     if gross == ZERO:
         return Decimal("0.00")
     total_days = (expiry - contract.inception_date).days + 1
@@ -183,3 +195,159 @@ _CHANGE_RULES = {
     Endorsement.Type.PREMIUM_ADJUSTMENT: ((), _no_changes),
     Endorsement.Type.CANCELLATION: ((), _no_changes),
 }
+
+
+def create_endorsement(mga_reference, data):
+    with transaction.atomic():
+        contract = _get_contract(mga_reference)
+        candidate = _build_candidate(contract, data)
+        candidate.full_clean(validate_constraints=False)
+        existing = list(Endorsement.objects.filter(contract=contract))
+        _reject_duplicate_number(candidate, existing)
+        _apply_business_rules(contract, candidate, existing)
+        candidate.save()
+    return candidate
+
+
+def _get_contract(mga_reference):
+    try:
+        return Contract.objects.get(mga_reference=mga_reference)
+    except Contract.DoesNotExist:
+        raise ValidationError(
+            {"mga_reference": "No contract exists with this reference."}
+        )
+
+
+def _build_candidate(contract, data):
+    unknown = [name for name in data if name not in CREATABLE_FIELDS]
+    if unknown:
+        raise ValidationError({name: "Unknown field." for name in unknown})
+    candidate = Endorsement(
+        contract=contract,
+        **{name: data[name] for name in CREATABLE_FIELDS if name in data},
+    )
+    candidate.changes = validate_endorsement_changes(candidate.type, candidate.changes)
+    if candidate.type == Endorsement.Type.CANCELLATION:
+        candidate.premium_change = None
+    elif candidate.premium_change is not None:
+        candidate.premium_change = _normalize_premium(candidate.premium_change)
+    return candidate
+
+
+def _normalize_premium(value):
+    try:
+        return _normalize_money(value, allow_negative=True)
+    except ValidationError as exc:
+        raise ValidationError({"premium_change": exc.messages})
+
+
+def _reject_duplicate_number(candidate, existing):
+    if any(e.endorsement_number == candidate.endorsement_number for e in existing):
+        raise ValidationError(
+            {"endorsement_number": "This endorsement number is already used for this contract."}
+        )
+
+
+def _apply_business_rules(contract, candidate, existing):
+    history = [e for e in existing if e.type != Endorsement.Type.CANCELLATION]
+    current_expiry = calculate_position(contract, history, date.max)["expiry_date"]
+    if not contract.inception_date <= candidate.effective_date <= current_expiry:
+        raise ValidationError(
+            {
+                "effective_date": (
+                    f"Effective date must be between {contract.inception_date.isoformat()} "
+                    f"and {current_expiry.isoformat()}."
+                )
+            }
+        )
+    if candidate.type == Endorsement.Type.EXTENSION:
+        proposed_expiry = date.fromisoformat(candidate.changes["expiry_date"])
+        if proposed_expiry <= current_expiry:
+            raise ValidationError(
+                {"changes": f"expiry_date must be later than the current expiry {current_expiry.isoformat()}."}
+            )
+
+    agreed = [e for e in existing if e.status == Endorsement.Status.AGREED]
+    agreed_cancellations = [
+        e for e in agreed if e.type == Endorsement.Type.CANCELLATION
+    ]
+    is_agreed_cancellation = (
+        candidate.type == Endorsement.Type.CANCELLATION
+        and candidate.status == Endorsement.Status.AGREED
+    )
+    if is_agreed_cancellation and agreed_cancellations:
+        raise ValidationError({"type": "Contract already has an agreed cancellation."})
+    if agreed_cancellations:
+        cutoff = agreed_cancellations[0].effective_date
+        if candidate.effective_date >= cutoff:
+            raise ValidationError(
+                {
+                    "effective_date": (
+                        "Effective date must be before the agreed cancellation "
+                        f"effective {cutoff.isoformat()}."
+                    )
+                }
+            )
+    if is_agreed_cancellation:
+        affected = [
+            str(e.endorsement_number)
+            for e in agreed
+            if e.type != Endorsement.Type.CANCELLATION
+            and e.effective_date >= candidate.effective_date
+        ]
+        if affected:
+            raise ValidationError(
+                {
+                    "effective_date": (
+                        "Cancellation would invalidate agreed endorsement(s) "
+                        f"{', '.join(affected)} effective on or after this date."
+                    )
+                }
+            )
+
+    if candidate.type == Endorsement.Type.CANCELLATION:
+        candidate.premium_change = _cancellation_refund(
+            contract, existing, candidate.effective_date
+        )
+    if candidate.status == Endorsement.Status.AGREED:
+        _check_non_negative_premium(contract, agreed + [candidate])
+
+
+def _cancellation_refund(contract, existing, effective_date):
+    try:
+        return calculate_cancellation_premium_change(contract, existing, effective_date)
+    except ValueError as exc:
+        key = (
+            "premium_change"
+            if str(exc) == NEGATIVE_PRE_CANCELLATION_GROSS
+            else "effective_date"
+        )
+        raise ValidationError({key: str(exc)})
+
+
+def _check_non_negative_premium(contract, endorsements):
+    for as_of in sorted({e.effective_date for e in endorsements}):
+        gross = contract.gross_premium
+        effective = sorted(
+            (e for e in endorsements if e.effective_date <= as_of),
+            key=lambda e: e.endorsement_number,
+        )
+        for endorsement in effective:
+            if endorsement.premium_change is None:
+                raise ValidationError(
+                    {
+                        "premium_change": (
+                            f"Agreed endorsement {endorsement.endorsement_number} has no premium change."
+                        )
+                    }
+                )
+            gross += endorsement.premium_change
+            if gross < ZERO:
+                raise ValidationError(
+                    {
+                        "premium_change": (
+                            f"Gross premium would become negative after endorsement "
+                            f"{endorsement.endorsement_number} on {as_of.isoformat()}."
+                        )
+                    }
+                )
