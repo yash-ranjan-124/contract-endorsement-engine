@@ -1,0 +1,50 @@
+[
+    {
+        "mga_reference": "MNK-PR-2026-001",
+        "insured_name": "Harbour Logistics Ltd",
+        "class_of_business": "Property",
+        "inception_date": "2026-01-01",
+        "expiry_date": "2026-12-31",
+        "currency": "GBP",
+        "sum_insured": "5000000.00",
+        "gross_premium": "120000.00",
+        "brokerage_pct": "20.00",
+        "signed_line_pct": "25.00"
+    },
+    {
+        "mga_reference": "MNK-MA-2026-002",
+        "insured_name": "Northwind Shipping Co",
+        "class_of_business": "Marine Cargo",
+        "inception_date": "2026-04-01",
+        "expiry_date": "2027-03-31",
+        "currency": "USD",
+        "sum_insured": "2000000.00",
+        "gross_premium": "45000.00",
+        "brokerage_pct": "17.50",
+        "signed_line_pct": "40.00"
+    },
+    {
+        "mga_reference": "MNK-AH-2026-003",
+        "insured_name": "Brightwell Care Group",
+        "class_of_business": "Accident and Health",
+        "inception_date": "2026-06-01",
+        "expiry_date": "2027-05-31",
+        "currency": "GBP",
+        "sum_insured": "1000000.00",
+        "gross_premium": "18500.00",
+        "brokerage_pct": "22.50",
+        "signed_line_pct": "100.00"
+    },
+    {
+        "mga_reference": "MNK-PR-2026-004",
+        "insured_name": "Eastgate Retail Ltd",
+        "class_of_business": "Property",
+        "inception_date": "2026-08-01",
+        "expiry_date": "2026-07-31",
+        "currency": "GBP",
+        "sum_insured": "750000.00",
+        "gross_premium": "9000.00",
+        "brokerage_pct": "20.00",
+        "signed_line_pct": "50.00"
+    }
+]

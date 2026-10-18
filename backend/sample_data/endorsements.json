@@ -1,0 +1,131 @@
+[
+    {
+        "mga_reference": "MNK-PR-2026-001",
+        "endorsement_number": 1,
+        "type": "CHANGE_SUM_INSURED",
+        "status": "AGREED",
+        "effective_date": "2026-03-01",
+        "recorded_date": "2026-03-05",
+        "premium_change": "20000.00",
+        "changes": {
+            "sum_insured": "6000000.00"
+        },
+        "reason": "Sum insured increased for new warehouse"
+    },
+    {
+        "mga_reference": "MNK-PR-2026-001",
+        "endorsement_number": 2,
+        "type": "CHANGE_DETAILS",
+        "status": "AGREED",
+        "effective_date": "2026-02-01",
+        "recorded_date": "2026-04-10",
+        "premium_change": "0.00",
+        "changes": {
+            "insured_name": "Harbour Logistics Group Ltd"
+        },
+        "reason": "Insured name changed after restructure"
+    },
+    {
+        "mga_reference": "MNK-PR-2026-001",
+        "endorsement_number": 3,
+        "type": "PREMIUM_ADJUSTMENT",
+        "status": "DRAFT",
+        "effective_date": "2026-06-01",
+        "recorded_date": "2026-06-03",
+        "premium_change": "5000.00",
+        "changes": {},
+        "reason": "Proposed additional premium, not yet agreed"
+    },
+    {
+        "mga_reference": "MNK-PR-2026-001",
+        "endorsement_number": 4,
+        "type": "CANCELLATION",
+        "status": "AGREED",
+        "effective_date": "2026-09-30",
+        "recorded_date": "2026-09-25",
+        "premium_change": null,
+        "changes": {},
+        "reason": "Cancelled at the insured's request"
+    },
+    {
+            "mga_reference": "MNK-PR-2026-001",
+            "endorsement_number": 5,
+            "type": "PREMIUM_ADJUSTMENT",
+            "status": "AGREED",
+            "effective_date": "2026-10-05",
+            "recorded_date": "2026-10-06",
+            "premium_change": "2000.00",
+            "changes": {},
+            "reason": "Late premium adjustment"
+        },
+        {
+            "mga_reference": "MNK-MA-2026-002",
+            "endorsement_number": 1,
+            "type": "PREMIUM_ADJUSTMENT",
+            "status": "AGREED",
+            "effective_date": "2026-07-01",
+            "recorded_date": "2026-07-02",
+            "premium_change": "3250.50",
+            "changes": {},
+            "reason": "Additional voyages declared"
+        },
+        {
+            "mga_reference": "MNK-MA-2026-002",
+            "endorsement_number": 2,
+            "type": "EXTENSION",
+            "status": "AGREED",
+            "effective_date": "2026-10-01",
+            "recorded_date": "2026-10-01",
+            "premium_change": "11250.00",
+            "changes": {
+                "expiry_date": "2027-06-30"
+            },
+            "reason": "Period extended by three months"
+        },
+        {
+            "mga_reference": "MNK-MA-2026-002",
+            "endorsement_number": 3,
+            "type": "PREMIUM_ADJUSTMENT",
+            "status": "AGREED",
+            "effective_date": "2026-05-15",
+            "recorded_date": "2026-08-20",
+            "premium_change": "-1500.00",
+            "changes": {},
+            "reason": "Return premium for a cancelled voyage"
+        },
+        {
+            "mga_reference": "MNK-MA-2026-002",
+            "endorsement_number": 3,
+            "type": "CHANGE_SUM_INSURED",
+            "status": "AGREED",
+            "effective_date": "2026-09-01",
+            "recorded_date": "2026-09-02",
+            "premium_change": "4000.00",
+            "changes": {
+                "sum_insured": "2500000.00"
+            },
+            "reason": "Limit increase"
+        },
+        {
+            "mga_reference": "MNK-MA-2026-002",
+            "endorsement_number": 4,
+            "type": "PREMIUM_ADJUSTMENT",
+            "status": "AGREED",
+            "effective_date": "2026-03-01",
+            "recorded_date": "2026-03-02",
+            "premium_change": "750.00",
+            "changes": {},
+            "reason": "Pre-inception adjustment"
+        },
+        {
+            "mga_reference": "MNK-XX-2026-999",
+            "endorsement_number": 1,
+            "type": "PREMIUM_ADJUSTMENT",
+            "status": "AGREED",
+            "effective_date": "2026-05-01",
+            "recorded_date": "2026-05-02",
+            "premium_change": "1000.00",
+            "changes": {},
+            "reason": "Adjustment for an unknown contract"
+        }
+    ]

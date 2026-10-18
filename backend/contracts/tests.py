@@ -1,8 +1,15 @@
+import json
+import os
+import tempfile
 from datetime import date
 from decimal import Decimal
+from io import StringIO
 from unittest.mock import patch
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.db.models import ProtectedError
 from django.test import SimpleTestCase, TestCase
 from rest_framework.test import APIClient
@@ -2008,3 +2015,227 @@ class ContractWriteApiTests(TestCase):
                         response = getattr(self.client, method)(url, {}, format="json")
 
                     self.assertEqual(response.status_code, 405)
+
+
+SAMPLE_DATA = settings.BASE_DIR / "sample_data"
+
+
+class ImportDataCommandTests(TestCase):
+    def setUp(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        self.temp_dir = temp_dir.name
+
+    def write(self, name, content):
+        path = os.path.join(self.temp_dir, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(content if isinstance(content, str) else json.dumps(content))
+        return path
+
+    def run_import(self, contracts, endorsements):
+        out = StringIO()
+        call_command(
+            "import_data",
+            self.write("contracts.json", contracts),
+            self.write("endorsements.json", endorsements),
+            stdout=out,
+        )
+        return out.getvalue()
+
+    def run_sample_import(self):
+        out = StringIO()
+        call_command(
+            "import_data",
+            str(SAMPLE_DATA / "contracts.json"),
+            str(SAMPLE_DATA / "endorsements.json"),
+            stdout=out,
+        )
+        return out.getvalue()
+
+    def test_sample_import_counts_and_rejection_reasons(self):
+        output = self.run_sample_import()
+
+        self.assertIn("Contracts: 3 loaded, 1 rejected.", output)
+        self.assertIn("Endorsements: 7 loaded, 4 rejected.", output)
+        self.assertEqual(Contract.objects.count(), 3)
+        self.assertEqual(Endorsement.objects.count(), 7)
+        self.assertRegex(output, r"Contract row 4 \(MNK-PR-2026-004\) rejected: expiry_date:")
+        self.assertRegex(
+            output,
+            r"Endorsement row 5 \(MNK-PR-2026-001, endorsement 5\) rejected: effective_date:",
+        )
+        self.assertRegex(
+            output,
+            r"Endorsement row 9 \(MNK-MA-2026-002, endorsement 3\) rejected: endorsement_number:",
+        )
+        self.assertRegex(
+            output,
+            r"Endorsement row 10 \(MNK-MA-2026-002, endorsement 4\) rejected: effective_date:",
+        )
+        self.assertRegex(
+            output,
+            r"Endorsement row 11 \(MNK-XX-2026-999, endorsement 1\) rejected: mga_reference:",
+        )
+
+    def test_invalid_contract_row_does_not_stop_later_rows(self):
+        output = self.run_import(
+            [
+                contract_payload(mga_reference="MGA-A"),
+                contract_payload(mga_reference="MGA-B", expiry_date="2025-12-31"),
+                contract_payload(mga_reference="MGA-C"),
+            ],
+            [],
+        )
+
+        self.assertIn("Contracts: 2 loaded, 1 rejected.", output)
+        self.assertEqual(
+            set(Contract.objects.values_list("mga_reference", flat=True)),
+            {"MGA-A", "MGA-C"},
+        )
+
+    def test_dependent_endorsement_loads_after_extension_row(self):
+        extension = endorsement_payload(
+            endorsement_number=1,
+            type="EXTENSION",
+            effective_date="2026-10-01",
+            premium_change="0.00",
+            changes={"expiry_date": "2027-06-30"},
+        )
+        premium = endorsement_payload(
+            endorsement_number=2, effective_date="2027-02-01", premium_change="100.00"
+        )
+        extension["mga_reference"] = premium["mga_reference"] = "MGA-2026-0001"
+
+        output = self.run_import([contract_payload()], [extension, premium])
+
+        self.assertIn("Endorsements: 2 loaded, 0 rejected.", output)
+
+    def test_dependent_endorsement_rejected_when_its_row_comes_first(self):
+        extension = endorsement_payload(
+            endorsement_number=1,
+            type="EXTENSION",
+            effective_date="2026-10-01",
+            premium_change="0.00",
+            changes={"expiry_date": "2027-06-30"},
+        )
+        premium = endorsement_payload(
+            endorsement_number=2, effective_date="2027-02-01", premium_change="100.00"
+        )
+        extension["mga_reference"] = premium["mga_reference"] = "MGA-2026-0001"
+
+        output = self.run_import([contract_payload()], [premium, extension])
+
+        self.assertIn("Endorsements: 1 loaded, 1 rejected.", output)
+        self.assertRegex(output, r"Endorsement row 1 \(MGA-2026-0001, endorsement 2\) rejected: effective_date:")
+
+    def test_draft_endorsement_is_stored_but_excluded_from_position(self):
+        self.run_sample_import()
+        contract = Contract.objects.get(mga_reference="MNK-PR-2026-001")
+        draft = Endorsement.objects.get(contract=contract, endorsement_number=3)
+        endorsements = list(Endorsement.objects.filter(contract=contract))
+
+        position = calculate_position(contract, endorsements, date(2026, 6, 15))
+
+        self.assertEqual(draft.status, Endorsement.Status.DRAFT)
+        self.assertEqual(position["applied_endorsements"], [1, 2])
+        self.assertEqual(position["gross_premium"], Decimal("140000.00"))
+
+    def test_harbour_cancellation_premium_change_is_refund(self):
+        self.run_sample_import()
+
+        cancellation = Endorsement.objects.get(
+            contract__mga_reference="MNK-PR-2026-001", endorsement_number=4
+        )
+
+        self.assertEqual(cancellation.premium_change, Decimal("-35671.23"))
+
+    def test_harbour_position_before_and_after_cancellation(self):
+        self.run_sample_import()
+        contract = Contract.objects.get(mga_reference="MNK-PR-2026-001")
+        endorsements = list(Endorsement.objects.filter(contract=contract))
+
+        before = calculate_position(contract, endorsements, date(2026, 9, 29))
+        after = calculate_position(contract, endorsements, date(2026, 9, 30))
+
+        self.assertEqual(before["status"], "BOUND")
+        self.assertEqual(before["applied_endorsements"], [1, 2])
+        self.assertEqual(before["gross_premium"], Decimal("140000.00"))
+        self.assertEqual(before["net_premium"], Decimal("112000.00"))
+        self.assertEqual(before["our_net_premium"], Decimal("28000.00"))
+        self.assertEqual(after["status"], "CANCELLED")
+        self.assertEqual(after["applied_endorsements"], [1, 2, 4])
+        self.assertEqual(after["expiry_date"], date(2026, 9, 29))
+        self.assertEqual(after["gross_premium"], Decimal("104328.77"))
+        self.assertEqual(after["net_premium"], Decimal("83463.02"))
+        self.assertEqual(after["our_net_premium"], Decimal("20865.75"))
+
+    def test_marine_extension_backdated_change_and_duplicate_rejection(self):
+        output = self.run_sample_import()
+        contract = Contract.objects.get(mga_reference="MNK-MA-2026-002")
+        endorsements = list(Endorsement.objects.filter(contract=contract))
+
+        at_expiry = calculate_position(contract, endorsements, date(2027, 1, 1))
+        backdated = calculate_position(contract, endorsements, date(2026, 6, 1))
+
+        self.assertEqual(at_expiry["expiry_date"], date(2027, 6, 30))
+        self.assertEqual(at_expiry["applied_endorsements"], [1, 2, 3])
+        self.assertEqual(at_expiry["gross_premium"], Decimal("58000.50"))
+        self.assertEqual(backdated["applied_endorsements"], [3])
+        self.assertEqual(backdated["gross_premium"], Decimal("43500.00"))
+        self.assertEqual(
+            Endorsement.objects.get(contract=contract, endorsement_number=3).type,
+            Endorsement.Type.PREMIUM_ADJUSTMENT,
+        )
+        self.assertIn("endorsement_number", output)
+
+    def test_malformed_json_fails_before_any_row_is_imported(self):
+        contracts_path = self.write("contracts.json", [contract_payload()])
+        endorsements_path = self.write("endorsements.json", "[{")
+
+        with self.assertRaisesMessage(CommandError, "is not valid JSON"):
+            call_command("import_data", contracts_path, endorsements_path, stdout=StringIO())
+
+        self.assertEqual(Contract.objects.count(), 0)
+
+    def test_missing_file_fails_before_any_row_is_imported(self):
+        contracts_path = self.write("contracts.json", [contract_payload()])
+
+        with self.assertRaisesMessage(CommandError, "File not found"):
+            call_command(
+                "import_data",
+                contracts_path,
+                os.path.join(self.temp_dir, "missing.json"),
+                stdout=StringIO(),
+            )
+
+        self.assertEqual(Contract.objects.count(), 0)
+
+    def test_non_array_top_level_fails_clearly(self):
+        contracts_path = self.write("contracts.json", {"mga_reference": "MGA-1"})
+        endorsements_path = self.write("endorsements.json", [])
+
+        with self.assertRaisesMessage(CommandError, "top-level JSON array"):
+            call_command("import_data", contracts_path, endorsements_path, stdout=StringIO())
+
+        self.assertEqual(Contract.objects.count(), 0)
+
+    def test_non_object_row_fails_clearly(self):
+        contracts_path = self.write("contracts.json", [1])
+        endorsements_path = self.write("endorsements.json", [])
+
+        with self.assertRaisesMessage(CommandError, "row 1 must be a JSON object"):
+            call_command("import_data", contracts_path, endorsements_path, stdout=StringIO())
+
+        self.assertEqual(Contract.objects.count(), 0)
+
+    def test_reimport_rejects_duplicates_and_does_not_overwrite(self):
+        self.run_sample_import()
+        contract_before = list(Contract.objects.values().order_by("pk"))
+        endorsement_before = list(Endorsement.objects.values().order_by("pk"))
+
+        output = self.run_sample_import()
+
+        self.assertIn("Contracts: 0 loaded, 4 rejected.", output)
+        self.assertIn("Endorsements: 0 loaded, 11 rejected.", output)
+        self.assertEqual(list(Contract.objects.values().order_by("pk")), contract_before)
+        self.assertEqual(list(Endorsement.objects.values().order_by("pk")), endorsement_before)
