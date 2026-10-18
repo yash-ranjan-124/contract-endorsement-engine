@@ -24,6 +24,19 @@ A Django REST API and React application for managing insurance contracts and the
 - `backend/` — API, models, business logic, import command, and tests
 - `frontend/` — React application
 
+## Data Model
+
+`Contract` stores the original bound slip only. It does not store the calculated as-amended position; that will be derived from the slip and its endorsements.
+
+Assumptions:
+- `mga_reference` is unique across contracts.
+- `currency` is an ISO-style three-letter uppercase ASCII code (e.g. `USD`).
+- `sum_insured` and `gross_premium` are never negative. Negativity is checked before rounding, so `-0.001` is rejected. Accepted inputs are `Decimal` values, integers and decimal strings; floats, malformed text and non-finite values are rejected. Accepted amounts are rounded to two decimal places using `ROUND_HALF_UP` (e.g. `100.005` is stored as `100.01`, `100.004` as `100.00`) before validation and storage.
+- `brokerage_pct` and `signed_line_pct` are between 0 and 100 inclusive.
+- `expiry_date` is on or after `inception_date`; a same-day cover is allowed.
+- `status` has a single allowed value, `BOUND`.
+- Slip fields are immutable after creation. `Contract.save()` rejects changes to existing rows. This is application-level protection: `QuerySet.update()`, bulk operations that modify existing rows, and raw SQL bypass it and must not be used to change slip data.
+
 ## Setup
 
 ### Prerequisites
