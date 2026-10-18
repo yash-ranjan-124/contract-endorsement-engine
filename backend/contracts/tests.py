@@ -1714,13 +1714,297 @@ class ContractReadApiTests(TestCase):
             records_before,
         )
 
-    def test_write_methods_are_not_allowed(self):
+    def test_unsupported_methods_are_not_allowed(self):
         self.make_contract()
-        for url in (
-            "/api/contracts/",
-            "/api/contracts/MGA-2026-0001/",
-            "/api/contracts/MGA-2026-0001/position/",
-        ):
+        for url in ("/api/contracts/MGA-2026-0001/", "/api/contracts/MGA-2026-0001/position/"):
             with self.subTest(url=url):
                 self.assertEqual(self.client.post(url, {}).status_code, 405)
+                self.assertEqual(self.client.put(url, {}).status_code, 405)
+                self.assertEqual(self.client.patch(url, {}).status_code, 405)
                 self.assertEqual(self.client.delete(url).status_code, 405)
+        with self.subTest(url="/api/contracts/"):
+            self.assertEqual(self.client.put("/api/contracts/", {}).status_code, 405)
+            self.assertEqual(self.client.patch("/api/contracts/", {}).status_code, 405)
+            self.assertEqual(self.client.delete("/api/contracts/").status_code, 405)
+
+
+def contract_payload(**overrides):
+    data = {
+        "mga_reference": "MGA-2026-0001",
+        "insured_name": "Acme Logistics Ltd",
+        "class_of_business": "Marine Cargo",
+        "inception_date": "2026-01-01",
+        "expiry_date": "2026-12-31",
+        "currency": "USD",
+        "sum_insured": "1000000.00",
+        "gross_premium": "120000.00",
+        "brokerage_pct": "10.00",
+        "signed_line_pct": "25.00",
+    }
+    data.update(overrides)
+    return data
+
+
+def endorsement_payload(**overrides):
+    data = {
+        "endorsement_number": 1,
+        "type": "PREMIUM_ADJUSTMENT",
+        "status": "AGREED",
+        "effective_date": "2026-03-01",
+        "recorded_date": "2026-02-15",
+        "premium_change": "500.00",
+        "changes": {},
+        "reason": "Adjust premium",
+    }
+    data.update(overrides)
+    return data
+
+
+class ContractWriteApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        patcher = patch("django.utils.timezone.localdate", return_value=TODAY)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def make_contract(self, **overrides):
+        values = {"gross_premium": Decimal("120000.00")}
+        values.update(overrides)
+        contract = build_contract(**values)
+        contract.save()
+        return contract
+
+    def post_contract(self, **overrides):
+        return self.client.post("/api/contracts/", contract_payload(**overrides), format="json")
+
+    def post_endorsement(self, reference="MGA-2026-0001", **overrides):
+        return self.client.post(
+            f"/api/contracts/{reference}/endorsements/",
+            endorsement_payload(**overrides),
+            format="json",
+        )
+
+    def test_create_contract_defaults_to_bound(self):
+        response = self.post_contract()
+
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertEqual(data["mga_reference"], "MGA-2026-0001")
+        self.assertEqual(data["status"], "BOUND")
+        self.assertEqual(data["sum_insured"], "1000000.00")
+        self.assertEqual(Contract.objects.get().status, Contract.Status.BOUND)
+
+    def test_contract_money_rounds_half_up(self):
+        response = self.post_contract(sum_insured="100.005", gross_premium="100.004")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["sum_insured"], "100.01")
+        self.assertEqual(response.json()["gross_premium"], "100.00")
+        self.assertEqual(Contract.objects.get().sum_insured, Decimal("100.01"))
+
+    def test_duplicate_reference_returns_field_error(self):
+        self.post_contract()
+
+        response = self.post_contract()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("mga_reference", response.json())
+        self.assertEqual(Contract.objects.count(), 1)
+
+    def test_invalid_contract_fields_return_field_errors(self):
+        cases = [
+            ({"expiry_date": "2025-12-31"}, "expiry_date"),
+            ({"expiry_date": "2026-02-30"}, "expiry_date"),
+            ({"inception_date": "01-01-2026"}, "inception_date"),
+            ({"brokerage_pct": "100.01"}, "brokerage_pct"),
+            ({"signed_line_pct": "-0.01"}, "signed_line_pct"),
+            ({"currency": "usd"}, "currency"),
+            ({"currency": "USDX"}, "currency"),
+            ({"sum_insured": "-0.01"}, "sum_insured"),
+            ({"gross_premium": "abc"}, "gross_premium"),
+            ({"status": "CANCELLED"}, "status"),
+            ({"id": 5}, "id"),
+            ({"unexpected": "x"}, "unexpected"),
+        ]
+        for overrides, field in cases:
+            with self.subTest(overrides=overrides):
+                response = self.post_contract(**overrides)
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(field, response.json())
+        self.assertEqual(Contract.objects.count(), 0)
+
+    def test_floating_point_and_boolean_money_rejected(self):
+        for field in ("sum_insured", "gross_premium"):
+            for value in (100.5, True):
+                with self.subTest(field=field, value=value):
+                    response = self.post_contract(**{field: value})
+
+                    self.assertEqual(response.status_code, 400)
+                    self.assertIn(field, response.json())
+        self.assertEqual(Contract.objects.count(), 0)
+
+    def test_valid_endorsement_creation_normalizes_changes(self):
+        self.make_contract()
+
+        response = self.post_endorsement(
+            type="CHANGE_DETAILS",
+            premium_change="0.00",
+            changes={"insured_name": "  Renamed Ltd  "},
+        )
+
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertEqual(data["number"], 1)
+        self.assertEqual(data["status"], "AGREED")
+        self.assertEqual(data["changes"], {"insured_name": "Renamed Ltd"})
+        self.assertEqual(data["premium_change"], "0.00")
+
+    def test_draft_endorsement_is_saved_without_position_effect(self):
+        self.make_contract()
+
+        response = self.post_endorsement(status="DRAFT", premium_change="1000.00")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["status"], "DRAFT")
+        position = self.client.get("/api/contracts/MGA-2026-0001/position/").json()
+        self.assertEqual(position["gross_premium"], "120000.00")
+        self.assertEqual(position["applied_endorsements"], [])
+
+    def test_signed_premium_adjustment_rounds_half_up(self):
+        self.make_contract()
+
+        response = self.post_endorsement(premium_change="-100.005")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["premium_change"], "-100.01")
+        position = self.client.get("/api/contracts/MGA-2026-0001/position/").json()
+        self.assertEqual(position["gross_premium"], "119899.99")
+
+    def test_cancellation_refund_is_calculated_and_supplied_amount_ignored(self):
+        self.make_contract()
+
+        response = self.post_endorsement(
+            type="CANCELLATION",
+            effective_date="2026-09-30",
+            premium_change="-1.00",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["premium_change"], "-30575.34")
+        self.assertEqual(
+            Endorsement.objects.get().premium_change, Decimal("-30575.34")
+        )
+
+    def test_cancellation_without_premium_uses_calculated_refund(self):
+        self.make_contract()
+        payload = endorsement_payload(type="CANCELLATION", effective_date="2026-09-30")
+        del payload["premium_change"]
+
+        response = self.client.post(
+            "/api/contracts/MGA-2026-0001/endorsements/", payload, format="json"
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["premium_change"], "-30575.34")
+
+    def test_unknown_contract_endorsement_returns_field_error(self):
+        response = self.post_endorsement("MGA-MISSING")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("mga_reference", response.json())
+
+    def test_duplicate_endorsement_number_returns_field_error(self):
+        self.make_contract()
+        self.assertEqual(self.post_endorsement().status_code, 201)
+
+        response = self.post_endorsement()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("endorsement_number", response.json())
+        self.assertEqual(Endorsement.objects.count(), 1)
+
+    def test_invalid_changes_return_field_errors(self):
+        self.make_contract()
+        cases = [
+            ("CHANGE_DETAILS", {}),
+            ("CHANGE_DETAILS", {"insured_name": "   "}),
+            ("PREMIUM_ADJUSTMENT", {"reason": "x"}),
+            ("EXTENSION", {"expiry_date": "2027-3-1"}),
+        ]
+        for endorsement_type, changes in cases:
+            with self.subTest(type=endorsement_type, changes=changes):
+                response = self.post_endorsement(type=endorsement_type, changes=changes)
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("changes", response.json())
+        self.assertEqual(Endorsement.objects.count(), 0)
+
+    def test_outside_cover_dates_return_field_errors(self):
+        self.make_contract()
+        for effective_date in ("2025-12-31", "2027-01-01"):
+            with self.subTest(effective_date=effective_date):
+                response = self.post_endorsement(effective_date=effective_date)
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("effective_date", response.json())
+
+    def test_cancellation_cutoff_returns_field_error(self):
+        self.make_contract()
+        self.assertEqual(
+            self.post_endorsement(
+                type="CANCELLATION", effective_date="2026-09-30"
+            ).status_code,
+            201,
+        )
+
+        response = self.post_endorsement(
+            endorsement_number=2, effective_date="2026-09-30", premium_change="100.00"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("effective_date", response.json())
+
+    def test_negative_amended_premium_returns_field_error(self):
+        self.make_contract()
+
+        response = self.post_endorsement(premium_change="-200000.00")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("premium_change", response.json())
+
+    def test_rejected_requests_do_not_modify_records(self):
+        contract = self.make_contract()
+        self.assertEqual(self.post_endorsement().status_code, 201)
+        contract_before = Contract.objects.values().get(pk=contract.pk)
+        records_before = list(Endorsement.objects.filter(contract=contract).values())
+
+        self.post_contract()
+        self.post_endorsement(endorsement_number=1)
+        self.post_endorsement(effective_date="2027-01-01")
+        self.post_endorsement("MGA-MISSING")
+
+        self.assertEqual(Contract.objects.values().get(pk=contract.pk), contract_before)
+        self.assertEqual(
+            list(Endorsement.objects.filter(contract=contract).values()), records_before
+        )
+        self.assertEqual(Contract.objects.count(), 1)
+
+    def test_unsupported_methods_remain_rejected(self):
+        self.make_contract()
+        self.post_endorsement()
+        cases = [
+            ("/api/contracts/", ("put", "patch", "delete")),
+            ("/api/contracts/MGA-2026-0001/", ("post", "put", "patch", "delete")),
+            ("/api/contracts/MGA-2026-0001/position/", ("post", "put", "patch", "delete")),
+            ("/api/contracts/MGA-2026-0001/endorsements/", ("get", "put", "patch", "delete")),
+        ]
+        for url, methods in cases:
+            for method in methods:
+                with self.subTest(url=url, method=method):
+                    if method == "get":
+                        response = self.client.get(url)
+                    else:
+                        response = getattr(self.client, method)(url, {}, format="json")
+
+                    self.assertEqual(response.status_code, 405)
