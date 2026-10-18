@@ -9,6 +9,12 @@ def _money(**kwargs):
     )
 
 
+def _calculated_money(**kwargs):
+    return serializers.DecimalField(
+        max_digits=None, decimal_places=2, coerce_to_string=True, read_only=True, **kwargs
+    )
+
+
 def _percentage():
     return serializers.DecimalField(
         max_digits=5, decimal_places=2, coerce_to_string=True, read_only=True
@@ -50,9 +56,9 @@ class PositionSerializer(serializers.Serializer):
     cancellation_effective_date = serializers.DateField(read_only=True, allow_null=True)
     currency = serializers.CharField(read_only=True)
     sum_insured = _money()
-    gross_premium = _money()
-    net_premium = _money(allow_null=True)
-    our_net_premium = _money(allow_null=True)
+    gross_premium = _calculated_money()
+    net_premium = _calculated_money(allow_null=True)
+    our_net_premium = _calculated_money(allow_null=True)
     applied_endorsements = serializers.ListField(
         child=serializers.IntegerField(), read_only=True
     )
