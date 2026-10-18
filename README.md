@@ -37,6 +37,16 @@ Assumptions:
 - `status` has a single allowed value, `BOUND`.
 - Slip fields are immutable after creation. `Contract.save()` rejects changes to existing rows. This is application-level protection: `QuerySet.update()`, bulk operations that modify existing rows, and raw SQL bypass it and must not be used to change slip data.
 
+### Endorsements
+
+`Endorsement` records a numbered change to a `Contract`. Each endorsement belongs to one contract (`contract.endorsements`), and deleting a contract that has endorsements is blocked.
+
+- `endorsement_number` is unique within a contract and starts at 1. The same number may be used by different contracts.
+- `premium_change` is signed: positive increases premium, negative reduces it. Values are rounded to two decimals using `ROUND_HALF_UP`, so `-100.005` is stored as `-100.01`. It may be empty only for `CANCELLATION`; the cancellation calculation that fills it in is not implemented yet.
+- `changes` must be a JSON object. `{}` is valid. Its contents are not validated yet.
+- Business rules are deferred: cover-date checks, type-specific validation of `changes`, and position calculations are not enforced by the model.
+- Endorsements have no immutability rule yet.
+
 ## Setup
 
 ### Prerequisites

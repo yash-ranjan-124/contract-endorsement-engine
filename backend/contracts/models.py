@@ -18,7 +18,7 @@ CURRENCY_VALIDATOR = RegexValidator(
 )
 
 
-def _normalize_money(value):
+def _normalize_money(value, *, allow_negative=False):
     if isinstance(value, bool) or not isinstance(value, (Decimal, int, str)):
         raise ValidationError("Enter a valid amount.")
     try:
@@ -27,7 +27,7 @@ def _normalize_money(value):
         raise ValidationError("Enter a valid amount.")
     if not amount.is_finite():
         raise ValidationError("Amount must be a finite number.")
-    if amount < ZERO:
+    if not allow_negative and amount < ZERO:
         raise ValidationError("Amount cannot be negative.")
     try:
         return amount.quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
@@ -118,3 +118,59 @@ class Contract(models.Model):
     @classmethod
     def _slip_field_names(cls):
         return [field.attname for field in cls._meta.concrete_fields if not field.primary_key]
+
+
+class Endorsement(models.Model):
+    class Type(models.TextChoices):
+        CHANGE_SUM_INSURED = "CHANGE_SUM_INSURED", "Change sum insured"
+        CHANGE_DETAILS = "CHANGE_DETAILS", "Change details"
+        PREMIUM_ADJUSTMENT = "PREMIUM_ADJUSTMENT", "Premium adjustment"
+        EXTENSION = "EXTENSION", "Extension"
+        CANCELLATION = "CANCELLATION", "Cancellation"
+
+    class Status(models.TextChoices):
+        DRAFT = "DRAFT", "Draft"
+        AGREED = "AGREED", "Agreed"
+
+    contract = models.ForeignKey(
+        Contract, on_delete=models.PROTECT, related_name="endorsements"
+    )
+    endorsement_number = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    type = models.CharField(max_length=30, choices=Type.choices)
+    status = models.CharField(max_length=10, choices=Status.choices)
+    effective_date = models.DateField()
+    recorded_date = models.DateField()
+    premium_change = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True
+    )
+    changes = models.JSONField(default=dict, blank=True)
+    reason = models.TextField()
+
+    class Meta:
+        ordering = ["endorsement_number"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["contract", "endorsement_number"],
+                name="unique_endorsement_number_per_contract",
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        if not isinstance(self.changes, dict):
+            raise ValidationError({"changes": "Changes must be a JSON object."})
+        if self.premium_change is None and self.type != self.Type.CANCELLATION:
+            raise ValidationError(
+                {"premium_change": "Premium change is required for this endorsement type."}
+            )
+
+    def save(self, *args, **kwargs):
+        if self.premium_change is not None:
+            try:
+                self.premium_change = _normalize_money(
+                    self.premium_change, allow_negative=True
+                )
+            except ValidationError as exc:
+                raise ValidationError({"premium_change": exc.messages})
+        self.full_clean()
+        super().save(*args, **kwargs)
