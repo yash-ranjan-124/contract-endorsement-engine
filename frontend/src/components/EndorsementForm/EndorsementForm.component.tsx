@@ -1,31 +1,12 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { ApiError, createEndorsement, type FieldErrors } from '../api'
+import { ApiError, createEndorsement, type FieldErrors } from '../../api'
 import type {
   Endorsement,
   EndorsementCreatePayload,
   EndorsementStatus,
   EndorsementType,
-} from '../types'
-
-type FormValues = {
-  endorsementNumber: string | null
-  type: EndorsementType
-  status: EndorsementStatus
-  effectiveDate: string
-  recordedDate: string
-  premiumChange: string
-  insuredName: string
-  sumInsured: string
-  expiryDate: string
-  reason: string
-}
-
-type EndorsementFormProps = {
-  reference: string
-  endorsements: Endorsement[]
-  disabled: boolean
-  onSaved: () => void
-}
+} from '../../types'
+import type { EndorsementFormProps, FormValues } from './EndorsementForm.types'
 
 const TYPE_OPTIONS: { value: EndorsementType; label: string }[] = [
   { value: 'CHANGE_DETAILS', label: 'Change details' },
@@ -210,11 +191,11 @@ export default function EndorsementForm({
   }
 
   function setField<K extends keyof FormValues>(field: K, value: FormValues[K]) {
-    setValues((current) => ({ ...current, [field]: value }))
+    setValues((current: FormValues) => ({ ...current, [field]: value }))
   }
 
   function changeType(type: EndorsementType) {
-    setValues((current) => ({ ...current, type }))
+    setValues((current: FormValues) => ({ ...current, type }))
     setFieldErrors({})
     setGeneralErrors([])
   }

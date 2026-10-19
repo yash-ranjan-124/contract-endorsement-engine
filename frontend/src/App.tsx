@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import ContractDetail from './components/ContractDetail'
-import ContractsList from './components/ContractsList'
+import ContractDetail from './components/ContractDetail/ContractDetail.component'
+import ContractsList from './components/ContractsList/ContractsList.component'
 
 export default function App() {
   const [selectedReference, setSelectedReference] = useState<string | null>(null)

@@ -1,35 +1,21 @@
 import { useEffect, useRef, useState } from 'react'
-import { fetchContractDetail, fetchContractPosition } from '../api'
+import { fetchContractDetail, fetchContractPosition } from '../../api'
 import type {
-  ContractDetail as ContractDetailData,
   ContractPosition,
-  ContractSlip,
   Endorsement,
-} from '../types'
-import EndorsementForm from './EndorsementForm'
-
-type DetailState =
-  | { kind: 'loading' }
-  | { kind: 'error'; message: string }
-  | { kind: 'ready'; detail: ContractDetailData }
-
-type PositionState =
-  | { kind: 'loading'; asAt: string }
-  | { kind: 'error'; asAt: string; message: string }
-  | { kind: 'ready'; position: ContractPosition }
-
-type PositionRequest = { asAt: string }
-
-type PositionView =
-  | { kind: 'cleared' }
-  | { kind: 'loading' }
-  | { kind: 'hidden'; message: string }
-  | { kind: 'error'; message: string }
-  | { kind: 'ready'; position: ContractPosition }
-
-type ContractDetailProps = {
-  reference: string
-}
+} from '../../types'
+import EndorsementForm from '../EndorsementForm/EndorsementForm.component'
+import './ContractDetail.style.css'
+import type {
+  AmendedTermProps,
+  ContractDetailProps,
+  DetailState,
+  PositionPanelProps,
+  PositionRequest,
+  PositionState,
+  PositionView,
+  TermProps,
+} from './ContractDetail.types'
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback
@@ -284,7 +270,7 @@ export default function ContractDetail({ reference }: ContractDetailProps) {
                     <td>{endorsement.status}</td>
                     <td className="text-nowrap">{endorsement.effective_date}</td>
                     <td className="text-nowrap">{endorsement.recorded_date}</td>
-                    <td className="text-end money">{endorsement.premium_change ?? '—'}</td>
+                    <td className="text-end contract-detail-money">{endorsement.premium_change ?? '—'}</td>
                     <td>{endorsement.reason}</td>
                     <td className="text-nowrap">
                       {applicationStatus(endorsement, activePosition)}
@@ -337,11 +323,7 @@ function PositionPanel({
   view,
   slip,
   onRetry,
-}: {
-  view: PositionView
-  slip: ContractSlip
-  onRetry: () => void
-}) {
+}: PositionPanelProps) {
   if (view.kind === 'cleared') {
     return <p className="text-body-secondary mb-0">Select a date to view the position.</p>
   }
@@ -395,7 +377,7 @@ function PositionPanel({
   )
 }
 
-function Term({ label, value }: { label: string; value: string }) {
+function Term({ label, value }: TermProps) {
   return (
     <>
       <dt className="col-sm-5">{label}</dt>
@@ -408,11 +390,7 @@ function AmendedTerm({
   label,
   value,
   original,
-}: {
-  label: string
-  value: string
-  original: string
-}) {
+}: AmendedTermProps) {
   const changed = original !== value
   return (
     <>
