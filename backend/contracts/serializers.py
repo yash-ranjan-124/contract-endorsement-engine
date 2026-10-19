@@ -1,12 +1,17 @@
 from datetime import date
 from decimal import Decimal
 
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from contracts.models import Contract, Endorsement
 
 PERCENTAGE_MIN = Decimal("0")
 PERCENTAGE_MAX = Decimal("100")
+
+CONTRACT_STATUS_CHOICES = Contract.Status.choices
+ENDORSEMENT_STATUS_CHOICES = Endorsement.Status.choices
+ENDORSEMENT_TYPE_CHOICES = Endorsement.Type.choices
 
 
 def _money(**kwargs):
@@ -70,6 +75,18 @@ class PositionSerializer(serializers.Serializer):
     )
 
 
+@extend_schema_field(
+    {
+        'oneOf': [
+            {'type': 'string', 'pattern': r'^-?\d+(\.\d+)?$', 'example': '100.005'},
+            {'type': 'integer', 'example': 100},
+        ],
+        'description': (
+            'Decimal string or integer. Extra decimal places are rounded half-up by the '
+            'server. JSON floats and booleans are rejected.'
+        ),
+    }
+)
 class MoneyInputField(serializers.Field):
     default_error_messages = {
         "invalid": "Enter an amount as a decimal string or integer, not a floating-point number.",
@@ -109,19 +126,35 @@ class ContractCreateSerializer(StrictInputSerializer):
         max_digits=5, decimal_places=2, min_value=PERCENTAGE_MIN, max_value=PERCENTAGE_MAX
     )
     status = serializers.ChoiceField(
-        choices=Contract.Status.choices, required=False
+        choices=CONTRACT_STATUS_CHOICES, required=False
     )
 
 
 class EndorsementCreateSerializer(StrictInputSerializer):
     endorsement_number = serializers.IntegerField()
-    type = serializers.ChoiceField(choices=Endorsement.Type.choices)
-    status = serializers.ChoiceField(choices=Endorsement.Status.choices)
+    type = serializers.ChoiceField(choices=ENDORSEMENT_TYPE_CHOICES)
+    status = serializers.ChoiceField(choices=ENDORSEMENT_STATUS_CHOICES)
     effective_date = serializers.DateField()
     recorded_date = serializers.DateField()
     premium_change = MoneyInputField(required=False, allow_null=True)
-    changes = serializers.JSONField(required=False, default=dict)
+    changes = serializers.JSONField(
+        required=False,
+        default=dict,
+        help_text=(
+            'Object required by the type: CHANGE_DETAILS {insured_name}, CHANGE_SUM_INSURED '
+            '{sum_insured}, EXTENSION {expiry_date as YYYY-MM-DD}. Use an empty object for '
+            'PREMIUM_ADJUSTMENT and CANCELLATION. Unexpected keys are rejected.'
+        ),
+    )
     reason = serializers.CharField()
+
+
+class ContractDetailSerializer(serializers.Serializer):
+    """Describes the contract detail response for the API schema."""
+
+    slip = ContractSlipSerializer(read_only=True)
+    endorsements = EndorsementSerializer(many=True, read_only=True)
+    current_position = PositionSerializer(read_only=True)
 
 
 class PositionQuerySerializer(serializers.Serializer):

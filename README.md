@@ -33,7 +33,11 @@ uv run python manage.py runserver
 
 API: http://127.0.0.1:8000/api/contracts/
 
+Swagger UI: http://127.0.0.1:8000/api/docs/ (OpenAPI schema: http://127.0.0.1:8000/api/schema/)
+
 The sample files include deliberately invalid rows. The import reports rejection reasons and continues loading valid records. Existing records are not overwritten.
+
+The API documentation uses `drf-spectacular`, which needs PyYAML. On a very new pre-release Python, such as 3.15.0, PyYAML may have no prebuilt wheel, and `uv sync` then tries to compile it and fails without a C++ compiler. In that case use Python 3.13: `uv sync --locked --python 3.13`, and add `--python 3.13` to later `uv run` commands.
 
 ### Frontend
 
@@ -105,6 +109,8 @@ Positions are calculated on demand rather than stored. Python `Decimal` arithmet
 | GET | `/api/contracts/{reference}/` | Retrieve the slip, endorsements and current position. |
 | GET | `/api/contracts/{reference}/position/?as_at=YYYY-MM-DD` | Calculate the position on a date; defaults to today. |
 | POST | `/api/contracts/{reference}/endorsements/` | Add an endorsement. |
+
+Interactive documentation is available at `/api/docs/` (Swagger UI), generated from the OpenAPI schema at `/api/schema/`. It describes request and response bodies, the optional `as_at` parameter, and the success and error responses. Money is returned as decimal strings and accepted as decimal strings or integers.
 
 ### Structure
 
