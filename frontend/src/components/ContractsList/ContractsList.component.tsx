@@ -1,15 +1,8 @@
 import { useEffect, useState } from 'react'
-import { fetchContractPositions } from '../api'
-import type { ContractPosition } from '../types'
-
-type LoadState =
-  | { kind: 'loading' }
-  | { kind: 'error'; message: string }
-  | { kind: 'ready'; contracts: ContractPosition[] }
-
-type ContractsListProps = {
-  onSelect: (reference: string) => void
-}
+import { fetchContractPositions } from '../../api'
+import type { ContractPosition } from '../../types'
+import './ContractsList.style.css'
+import type { ContractsListProps, LoadState } from './ContractsList.types'
 
 function formatMoney(value: string): string {
   const [whole, fraction = ''] = value.split('.')
@@ -91,7 +84,7 @@ export default function ContractsList({ onSelect }: ContractsListProps) {
           </tr>
         </thead>
         <tbody>
-          {state.contracts.map((contract) => (
+          {state.contracts.map((contract: ContractPosition) => (
             <tr key={contract.mga_reference}>
               <td className="text-nowrap">
                 <button
@@ -110,7 +103,7 @@ export default function ContractsList({ onSelect }: ContractsListProps) {
                 {contract.inception_date} to {contract.expiry_date}
               </td>
               <td>{contract.currency}</td>
-              <td className="text-end money">{formatMoney(contract.gross_premium)}</td>
+              <td className="text-end contracts-list-money">{formatMoney(contract.gross_premium)}</td>
             </tr>
           ))}
         </tbody>
