@@ -2252,3 +2252,117 @@ class ImportDataCommandTests(TestCase):
         self.assertIn("Endorsements: 0 loaded, 11 rejected.", output)
         self.assertEqual(list(Contract.objects.values().order_by("pk")), contract_before)
         self.assertEqual(list(Endorsement.objects.values().order_by("pk")), endorsement_before)
+
+
+class ApiDocsTests(TestCase):
+    def load_schema(self):
+        response = self.client.get("/api/schema/", {"format": "json"})
+        self.assertEqual(response.status_code, 200)
+        return json.loads(response.content)
+
+    def test_schema_generates_without_warnings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "schema.yml")
+
+            call_command(
+                "spectacular",
+                file=path,
+                validate=True,
+                fail_on_warn=True,
+                stdout=StringIO(),
+                stderr=StringIO(),
+            )
+
+            self.assertGreater(os.path.getsize(path), 0)
+
+    def test_schema_documents_the_five_operations(self):
+        paths = self.load_schema()["paths"]
+
+        self.assertEqual(
+            {path: set(operations) for path, operations in paths.items()},
+            {
+                "/api/contracts/": {"get", "post"},
+                "/api/contracts/{reference}/": {"get"},
+                "/api/contracts/{reference}/position/": {"get"},
+                "/api/contracts/{reference}/endorsements/": {"post"},
+            },
+        )
+
+    def test_shared_contracts_route_has_separate_get_and_post_schemas(self):
+        operations = self.load_schema()["paths"]["/api/contracts/"]
+
+        listing = operations["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+        self.assertEqual(listing["type"], "array")
+        self.assertEqual(listing["items"], {"$ref": "#/components/schemas/Position"})
+        self.assertNotIn("requestBody", operations["get"])
+        self.assertEqual(
+            operations["post"]["requestBody"]["content"]["application/json"]["schema"],
+            {"$ref": "#/components/schemas/ContractCreate"},
+        )
+        self.assertEqual(set(operations["post"]["responses"]), {"201", "400"})
+
+    def test_detail_and_position_parameters_and_responses(self):
+        paths = self.load_schema()["paths"]
+        detail = paths["/api/contracts/{reference}/"]["get"]
+        position = paths["/api/contracts/{reference}/position/"]["get"]
+
+        self.assertEqual(set(detail["responses"]), {"200", "404"})
+        self.assertEqual(set(position["responses"]), {"200", "400", "404"})
+        parameters = {parameter["name"]: parameter for parameter in position["parameters"]}
+        self.assertTrue(parameters["reference"]["required"])
+        self.assertEqual(parameters["reference"]["in"], "path")
+        self.assertEqual(parameters["as_at"]["in"], "query")
+        self.assertFalse(parameters["as_at"].get("required", False))
+        self.assertEqual(parameters["as_at"]["schema"], {"type": "string", "format": "date"})
+
+    def test_endorsement_creation_documents_request_and_errors(self):
+        operation = self.load_schema()["paths"]["/api/contracts/{reference}/endorsements/"]["post"]
+
+        self.assertEqual(
+            operation["requestBody"]["content"]["application/json"]["schema"],
+            {"$ref": "#/components/schemas/EndorsementCreate"},
+        )
+        self.assertEqual(set(operation["responses"]), {"201", "400"})
+        created = operation["responses"]["201"]["content"]["application/json"]["schema"]
+        self.assertEqual(created, {"$ref": "#/components/schemas/Endorsement"})
+
+    def test_detail_response_contains_slip_history_and_position(self):
+        components = self.load_schema()["components"]["schemas"]
+
+        self.assertEqual(
+            set(components["ContractDetail"]["properties"]),
+            {"slip", "endorsements", "current_position"},
+        )
+        self.assertIn("number", components["Endorsement"]["properties"])
+        self.assertNotIn("endorsement_number", components["Endorsement"]["properties"])
+
+    def test_money_responses_are_decimal_strings(self):
+        components = self.load_schema()["components"]["schemas"]
+
+        for name in ("sum_insured", "gross_premium", "net_premium", "our_net_premium"):
+            with self.subTest(field=name):
+                field = components["Position"]["properties"][name]
+                self.assertEqual((field["type"], field["format"]), ("string", "decimal"))
+        premium = components["Endorsement"]["properties"]["premium_change"]
+        self.assertEqual((premium["type"], premium["format"]), ("string", "decimal"))
+        self.assertTrue(premium["nullable"])
+
+    def test_money_requests_accept_decimal_strings_or_integers(self):
+        components = self.load_schema()["components"]["schemas"]
+
+        fields = [
+            components["ContractCreate"]["properties"]["sum_insured"],
+            components["ContractCreate"]["properties"]["gross_premium"],
+            components["EndorsementCreate"]["properties"]["premium_change"],
+        ]
+        for field in fields:
+            self.assertEqual([option["type"] for option in field["oneOf"]], ["string", "integer"])
+        self.assertNotIn("premium_change", components["EndorsementCreate"]["required"])
+
+    def test_swagger_ui_is_served_for_the_schema(self):
+        response = self.client.get("/api/docs/")
+
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode()
+        self.assertIn("swagger", content.lower())
+        self.assertIn("/api/schema/", content)

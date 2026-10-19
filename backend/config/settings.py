@@ -16,6 +16,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    'drf_spectacular',
     'contracts',
 ]
 
@@ -86,4 +87,19 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 REST_FRAMEWORK = {
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 100,
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Contract Endorsement Engine API',
+    'DESCRIPTION': (
+        'Original contract slips, numbered endorsements and date-based contract positions.'
+    ),
+    'VERSION': '0.1.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'ENUM_NAME_OVERRIDES': {
+        'ContractStatusEnum': 'contracts.serializers.CONTRACT_STATUS_CHOICES',
+        'EndorsementStatusEnum': 'contracts.serializers.ENDORSEMENT_STATUS_CHOICES',
+        'EndorsementTypeEnum': 'contracts.serializers.ENDORSEMENT_TYPE_CHOICES',
+    },
 }
