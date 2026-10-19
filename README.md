@@ -144,7 +144,7 @@ An AI agent could use a read-only position API or a narrow MCP tool accepting on
 ## AI Tools Used
 
 - **Claude Code with Haiku 5.5:** used for writing backend and frontend code, tests and documentation in small implementation steps.
-- **ChatGPT:** used for requirements discussion, implementation planning and code review.
+- **ChatGPT:** used for requirements generation, modular prompt crafting.
 
 ## Improvements With More Time
 
